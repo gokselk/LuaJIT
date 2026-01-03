@@ -634,29 +634,79 @@ impl<'a> Compiler<'a> {
     fn parse_function_stat(&mut self) -> LuaResult<()> {
         self.lexer.next()?; // consume 'function'
 
-        // Parse name (may be table field access)
-        let name = match self.lexer.next()?.kind {
+        // Parse name (may be table field access like t.foo or t:method)
+        let first_name = match self.lexer.next()?.kind {
             TokenKind::Name(n) => n,
             _ => return Err(LuaError::SyntaxError("expected function name".to_string())),
         };
 
-        let _is_method = self.lexer.match_token(&TokenKind::Colon)?;
+        // Check for field access (t.foo) or method (t:method)
+        let mut is_method = false;
+        let mut table_expr: Option<ExprDesc> = None;
+        let mut field_name: Option<String> = None;
+
+        loop {
+            if self.lexer.match_token(&TokenKind::Dot)? {
+                // t.foo.bar...
+                let name = match self.lexer.next()?.kind {
+                    TokenKind::Name(n) => n,
+                    _ => return Err(LuaError::SyntaxError("expected name after '.'".to_string())),
+                };
+                if table_expr.is_none() {
+                    // First dot - resolve the base name
+                    table_expr = Some(self.resolve_name(&first_name)?);
+                }
+                // Access the field
+                let table_reg = self.expr_to_register(table_expr.take().unwrap())?;
+                let key_idx = self.fs_mut().add_string_constant(&name);
+                table_expr = Some(ExprDesc::Index {
+                    table: table_reg,
+                    key: key_idx as u8,
+                    key_is_const: true,
+                });
+                field_name = Some(name);
+            } else if self.lexer.match_token(&TokenKind::Colon)? {
+                // t:method (method definition)
+                let name = match self.lexer.next()?.kind {
+                    TokenKind::Name(n) => n,
+                    _ => return Err(LuaError::SyntaxError("expected method name after ':'".to_string())),
+                };
+                if table_expr.is_none() {
+                    table_expr = Some(self.resolve_name(&first_name)?);
+                }
+                field_name = Some(name);
+                is_method = true;
+                break; // Method is always last
+            } else {
+                break;
+            }
+        }
 
         // Parse function body
-        let proto = self.parse_function_body(false)?;
+        let proto = self.parse_function_body(is_method)?;
 
         // Add child proto to parent and get index
         let proto_idx = self.fs().proto.child_protos.len();
         self.fs_mut().proto.child_protos.push(Box::new(proto));
 
-        // Create closure and assign
+        // Create closure
         let line = self.current_line();
-        let reg = self.fs_mut().reserve_reg();
-        self.fs_mut().emit(Instruction::ad(Opcode::FNEW, reg, proto_idx as u16), line);
+        let func_reg = self.fs_mut().reserve_reg();
+        self.fs_mut().emit(Instruction::ad(Opcode::FNEW, func_reg, proto_idx as u16), line);
 
-        // Assign to name (simplified - assumes global)
-        let name_idx = self.fs_mut().add_string_constant(&name);
-        self.fs_mut().emit(Instruction::ad(Opcode::GSET, reg, name_idx as u16), line);
+        if let Some(fname) = field_name {
+            // Assign to table field: t.foo = function or t.method = function
+            let table_reg = self.expr_to_register(table_expr.unwrap())?;
+            let key_idx = self.fs_mut().add_string_constant(&fname);
+            self.fs_mut().emit(
+                Instruction::abc(Opcode::TSETS, table_reg, func_reg, key_idx as u8),
+                line,
+            );
+        } else {
+            // Assign to global
+            let name_idx = self.fs_mut().add_string_constant(&first_name);
+            self.fs_mut().emit(Instruction::ad(Opcode::GSET, func_reg, name_idx as u16), line);
+        }
         self.fs_mut().free_regs(1);
 
         Ok(())
@@ -1113,6 +1163,100 @@ impl<'a> Compiler<'a> {
         Ok(left)
     }
 
+    /// Continue parsing an expression given an already-parsed primary in a register.
+    /// This handles the case in table constructors where we've already consumed a name
+    /// but need to continue parsing operators like + - * / etc.
+    fn parse_subexpr_with_primary(&mut self, primary_reg: u8, _min_prec: u8) -> LuaResult<ExprDesc> {
+        let mut left = ExprDesc::Register(primary_reg);
+
+        // Handle power operator (highest precedence among binary ops after primary)
+        if self.lexer.match_token(&TokenKind::Caret)? {
+            let left_reg = self.expr_to_register(left)?;
+            let right = self.parse_unary_expr()?;
+            let right_reg = self.expr_to_register(right)?;
+            let result_reg = self.fs_mut().reserve_reg();
+            let line = self.current_line();
+            self.fs_mut().emit(
+                Instruction::abc(Opcode::POW, result_reg, left_reg, right_reg),
+                line,
+            );
+            self.fs_mut().free_reg = result_reg + 1;
+            left = ExprDesc::Register(result_reg);
+        }
+
+        // Handle mul/div operators
+        loop {
+            let op = match &self.lexer.peek()?.kind {
+                TokenKind::Star => Opcode::MULVV,
+                TokenKind::Slash => Opcode::DIVVV,
+                TokenKind::Percent => Opcode::MODVV,
+                TokenKind::SlashSlash => Opcode::DIVVV,
+                _ => break,
+            };
+            self.lexer.next()?;
+
+            let left_reg = self.expr_to_register(left)?;
+            let right = self.parse_unary_expr()?;
+            let right_reg = self.expr_to_register(right)?;
+            let result_reg = self.fs_mut().reserve_reg();
+            let line = self.current_line();
+            self.fs_mut().emit(
+                Instruction::abc(op, result_reg, left_reg, right_reg),
+                line,
+            );
+            self.fs_mut().free_reg = result_reg + 1;
+            left = ExprDesc::Register(result_reg);
+        }
+
+        // Handle add/sub operators
+        loop {
+            let op = match &self.lexer.peek()?.kind {
+                TokenKind::Plus => Opcode::ADDVV,
+                TokenKind::Minus => Opcode::SUBVV,
+                _ => break,
+            };
+            self.lexer.next()?;
+
+            let left_reg = self.expr_to_register(left)?;
+            let right = self.parse_mul_expr()?;
+            let right_reg = self.expr_to_register(right)?;
+            let result_reg = self.fs_mut().reserve_reg();
+            let line = self.current_line();
+            self.fs_mut().emit(
+                Instruction::abc(op, result_reg, left_reg, right_reg),
+                line,
+            );
+            self.fs_mut().free_reg = result_reg + 1;
+            left = ExprDesc::Register(result_reg);
+        }
+
+        // Handle concat operator
+        if self.lexer.match_token(&TokenKind::DotDot)? {
+            let left_reg = self.expr_to_register(left)?;
+            let mut right_count = 0u8;
+
+            loop {
+                let right = self.parse_add_expr()?;
+                self.expr_to_next_reg(right)?;
+                right_count += 1;
+
+                if !self.lexer.match_token(&TokenKind::DotDot)? {
+                    break;
+                }
+            }
+
+            let line = self.current_line();
+            self.fs_mut().emit(
+                Instruction::abc(Opcode::CAT, left_reg, left_reg, left_reg + right_count),
+                line,
+            );
+            self.fs_mut().free_reg = left_reg + 1;
+            left = ExprDesc::Register(left_reg);
+        }
+
+        Ok(left)
+    }
+
     fn parse_unary_expr(&mut self) -> LuaResult<ExprDesc> {
         match &self.lexer.peek()?.kind {
             TokenKind::Not => {
@@ -1199,12 +1343,19 @@ impl<'a> Compiler<'a> {
                 }
                 TokenKind::Colon => {
                     self.lexer.next()?;
-                    let _name = match self.lexer.next()?.kind {
+                    let method_name = match self.lexer.next()?.kind {
                         TokenKind::Name(n) => n,
                         _ => return Err(LuaError::SyntaxError("expected name after ':'".to_string())),
                     };
-                    // Method call
-                    expr = self.parse_call_expr(expr, true)?;
+                    // Method call: obj:method(args) -> obj.method(obj, args)
+                    let table_reg = self.expr_to_register(expr)?;
+                    let method_idx = self.fs_mut().add_string_constant(&method_name);
+                    let method_expr = ExprDesc::Index {
+                        table: table_reg,
+                        key: method_idx as u8,
+                        key_is_const: true,
+                    };
+                    expr = self.parse_method_call_expr(method_expr, table_reg)?;
                 }
                 TokenKind::LParen | TokenKind::LBrace | TokenKind::String(_) => {
                     expr = self.parse_call_expr(expr, false)?;
@@ -1267,6 +1418,68 @@ impl<'a> Compiler<'a> {
         // Emit CALL
         self.fs_mut().emit(
             Instruction::abc(Opcode::CALL, base, num_args + 1, 2), // 2 = 1 result + 1
+            line,
+        );
+        self.fs_mut().free_reg = base + 1;
+
+        Ok(ExprDesc::Call(base, 1))
+    }
+
+    /// Parse method call: obj:method(args) - obj is passed as first argument
+    fn parse_method_call_expr(&mut self, method: ExprDesc, self_reg: u8) -> LuaResult<ExprDesc> {
+        let line = self.current_line();
+
+        // Layout: [func, self, arg1, arg2, ...]
+        let base = self.fs().free_reg;
+        self.expr_to_reg(method, base)?;
+        self.fs_mut().free_reg = base + 1;
+
+        // Copy self to be first argument
+        self.fs_mut().emit(
+            Instruction::ad(Opcode::MOV, base + 1, self_reg as u16),
+            line,
+        );
+        self.fs_mut().free_reg = base + 2;
+
+        // Parse arguments (starting at base + 2)
+        let num_args = match &self.lexer.peek()?.kind {
+            TokenKind::LParen => {
+                self.lexer.next()?;
+                let mut count = 1u8; // Start at 1 for self
+                if !self.lexer.check(&TokenKind::RParen)? {
+                    loop {
+                        let target = self.fs().free_reg;
+                        let arg = self.parse_expression()?;
+                        self.expr_to_reg(arg, target)?;
+                        self.fs_mut().free_reg = target + 1;
+                        count += 1;
+                        if !self.lexer.match_token(&TokenKind::Comma)? {
+                            break;
+                        }
+                    }
+                }
+                self.lexer.expect(TokenKind::RParen)?;
+                count
+            }
+            TokenKind::LBrace => {
+                let arg = self.parse_table_constructor()?;
+                self.expr_to_next_reg(arg)?;
+                2 // self + table
+            }
+            TokenKind::String(s) => {
+                let s = s.clone();
+                self.lexer.next()?;
+                let idx = self.fs_mut().add_string_constant(&s);
+                let reg = self.fs_mut().reserve_reg();
+                self.fs_mut().emit(Instruction::ad(Opcode::KSTR, reg, idx as u16), line);
+                2 // self + string
+            }
+            _ => return Err(LuaError::SyntaxError("expected method arguments".to_string())),
+        };
+
+        // Emit CALL
+        self.fs_mut().emit(
+            Instruction::abc(Opcode::CALL, base, num_args + 1, 2),
             line,
         );
         self.fs_mut().free_reg = base + 1;
@@ -1470,9 +1683,11 @@ impl<'a> Compiler<'a> {
                 }
                 TokenKind::Name(name) => {
                     let name = name.clone();
+                    // Peek ahead to see if this is `name = value` pattern
+                    // We need to save position in case we need to parse as expression
                     self.lexer.next()?;
                     if self.lexer.check(&TokenKind::Eq)? {
-                        // name = value
+                        // name = value (hash field)
                         self.lexer.next()?;
                         let val = self.parse_expression()?;
                         let val_reg = self.expr_to_register(val)?;
@@ -1485,9 +1700,65 @@ impl<'a> Compiler<'a> {
                         );
                         hash_count += 1;
                     } else {
-                        // Array element (name is an expression)
-                        let expr = self.resolve_name(&name)?;
-                        let val_reg = self.expr_to_register(expr)?;
+                        // Array element - name is start of a suffixed expression
+                        // Resolve name first to get primary
+                        let mut expr = self.resolve_name(&name)?;
+
+                        // Handle suffixes (indexing, calls) just like parse_suffixed_expr
+                        loop {
+                            match &self.lexer.peek()?.kind {
+                                TokenKind::Dot => {
+                                    self.lexer.next()?;
+                                    let field = match self.lexer.next()?.kind {
+                                        TokenKind::Name(n) => n,
+                                        _ => return Err(LuaError::SyntaxError("expected name after '.'".to_string())),
+                                    };
+                                    let table_reg = self.expr_to_register(expr)?;
+                                    let key_idx = self.fs_mut().add_string_constant(&field);
+                                    expr = ExprDesc::Index {
+                                        table: table_reg,
+                                        key: key_idx as u8,
+                                        key_is_const: true,
+                                    };
+                                }
+                                TokenKind::LBracket => {
+                                    self.lexer.next()?;
+                                    let table_reg = self.expr_to_register(expr)?;
+                                    let key_expr = self.parse_expression()?;
+                                    let key_reg = self.expr_to_register(key_expr)?;
+                                    self.lexer.expect(TokenKind::RBracket)?;
+                                    expr = ExprDesc::Index {
+                                        table: table_reg,
+                                        key: key_reg,
+                                        key_is_const: false,
+                                    };
+                                }
+                                TokenKind::LParen | TokenKind::LBrace | TokenKind::String(_) => {
+                                    expr = self.parse_call_expr(expr, false)?;
+                                }
+                                TokenKind::Colon => {
+                                    self.lexer.next()?;
+                                    let method_name = match self.lexer.next()?.kind {
+                                        TokenKind::Name(n) => n,
+                                        _ => return Err(LuaError::SyntaxError("expected method name".to_string())),
+                                    };
+                                    let table_reg = self.expr_to_register(expr)?;
+                                    let method_idx = self.fs_mut().add_string_constant(&method_name);
+                                    let method_expr = ExprDesc::Index {
+                                        table: table_reg,
+                                        key: method_idx as u8,
+                                        key_is_const: true,
+                                    };
+                                    expr = self.parse_method_call_expr(method_expr, table_reg)?;
+                                }
+                                _ => break,
+                            }
+                        }
+
+                        // Continue with binary operations if any
+                        let primary_reg = self.expr_to_register(expr)?;
+                        let val = self.parse_subexpr_with_primary(primary_reg, 0)?;
+                        let val_reg = self.expr_to_register(val)?;
                         array_count += 1;
 
                         let line = self.current_line();
@@ -1522,12 +1793,17 @@ impl<'a> Compiler<'a> {
         Ok(ExprDesc::Register(reg))
     }
 
-    fn parse_function_body(&mut self, _is_method: bool) -> LuaResult<Proto> {
+    fn parse_function_body(&mut self, is_method: bool) -> LuaResult<Proto> {
         self.lexer.expect(TokenKind::LParen)?;
 
         // Parse parameters
         let mut params = Vec::new();
         let mut is_vararg = false;
+
+        // For methods, implicitly add 'self' as first parameter
+        if is_method {
+            params.push("self".to_string());
+        }
 
         if !self.lexer.check(&TokenKind::RParen)? {
             loop {

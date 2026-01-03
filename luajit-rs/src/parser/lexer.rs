@@ -437,15 +437,32 @@ impl<'a> Lexer<'a> {
                         Some('"') => '"',
                         Some('\'') => '\'',
                         Some('\n') => '\n',
-                        Some('0'..='9') => {
-                            // Decimal escape \ddd
-                            let mut num = 0u32;
-                            // Already consumed first digit, go back
-                            // Actually we need to handle this differently
-                            // For simplicity, just use the digit
-                            return Err(LuaError::SyntaxError(
-                                "decimal escapes not fully implemented".to_string(),
-                            ));
+                        Some(d1 @ '0'..='9') => {
+                            // Decimal escape \ddd (up to 3 digits, value <= 255)
+                            let mut num = d1.to_digit(10).unwrap();
+
+                            // Try to read second digit
+                            if let Some(d2 @ '0'..='9') = self.peek_char() {
+                                self.advance();
+                                num = num * 10 + d2.to_digit(10).unwrap();
+
+                                // Try to read third digit
+                                if let Some(d3 @ '0'..='9') = self.peek_char() {
+                                    let new_num = num * 10 + d3.to_digit(10).unwrap();
+                                    // Only consume if result <= 255
+                                    if new_num <= 255 {
+                                        self.advance();
+                                        num = new_num;
+                                    }
+                                }
+                            }
+
+                            if num > 255 {
+                                return Err(LuaError::SyntaxError(
+                                    format!("decimal escape too large: {}", num),
+                                ));
+                            }
+                            (num as u8) as char
                         }
                         Some('x') => {
                             // Hex escape \xXX
