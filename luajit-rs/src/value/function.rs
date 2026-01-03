@@ -209,6 +209,11 @@ impl Upvalue {
     pub fn get_stack_slot(&self) -> Option<*mut Value> {
         self.stack_slot.get()
     }
+
+    /// Alias for get_stack_slot
+    pub fn stack_slot(&self) -> Option<*mut Value> {
+        self.stack_slot.get()
+    }
 }
 
 /// A Lua closure - a function with its captured upvalues.

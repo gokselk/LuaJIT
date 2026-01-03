@@ -803,11 +803,11 @@ impl<'a> Interpreter<'a> {
                             // Set up upvalues based on the child proto's upvalue descriptors
                             for uv_desc in &child_proto.upvalues {
                                 let upvalue = if uv_desc.in_stack {
-                                    // Capture from current stack frame
+                                    // Capture from current stack frame - use the open upvalue list
                                     let abs_slot = base + uv_desc.index as usize;
                                     let slot_ptr = self.state.stack.slot_ptr(abs_slot);
-                                    let uv = Upvalue::new_open(slot_ptr);
-                                    self.state.gc.alloc(uv)
+                                    // Find or create an upvalue for this slot
+                                    self.state.find_or_create_upvalue(slot_ptr)
                                 } else {
                                     // Get from parent closure's upvalues
                                     unsafe {
@@ -831,7 +831,12 @@ impl<'a> Interpreter<'a> {
 
                 // Close upvalues
                 Opcode::UCLO => {
-                    // Close upvalues (simplified - would need upvalue list)
+                    // Close upvalues for slots >= A
+                    let close_slot = base + a;
+                    let slot_ptr = self.state.stack.slot_ptr(close_slot);
+                    self.state.close_upvalues(slot_ptr);
+
+                    // Handle jump if present
                     let offset = instr.jump();
                     if offset != 0 {
                         let frame = self.state.call_stack.current_mut().unwrap();

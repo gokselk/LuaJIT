@@ -40,6 +40,8 @@ pub struct State {
     pub allow_hook: bool,
     /// Status
     pub status: ThreadStatus,
+    /// Head of the open upvalue list (sorted by stack slot address, highest first)
+    pub open_upvalues: Option<GcRef<Upvalue>>,
 }
 
 /// Thread/coroutine status
@@ -78,6 +80,7 @@ impl State {
             hook_count: 0,
             allow_hook: true,
             status: ThreadStatus::Ok,
+            open_upvalues: None,
         };
 
         // Initialize standard globals
@@ -319,6 +322,68 @@ impl State {
         let native = crate::value::NativeFunction::new(func);
         let func_ref = self.gc.alloc(Function::Native(native));
         self.set_global(name, Value::function(func_ref));
+    }
+
+    /// Find or create an open upvalue for a stack slot.
+    /// Reuses existing upvalue if one exists for this slot.
+    pub fn find_or_create_upvalue(&mut self, slot_ptr: *mut Value) -> GcRef<Upvalue> {
+        // Walk the list (sorted by slot address, highest first)
+        let mut prev: Option<GcRef<Upvalue>> = None;
+        let mut current = self.open_upvalues;
+
+        while let Some(uv_ref) = current {
+            let uv = unsafe { &*uv_ref.as_ptr() };
+            if let Some(uv_slot) = uv.stack_slot() {
+                if uv_slot == slot_ptr {
+                    // Found existing upvalue for this slot
+                    return uv_ref;
+                }
+                if (uv_slot as usize) < (slot_ptr as usize) {
+                    // Insert before this one
+                    break;
+                }
+            }
+            prev = Some(uv_ref);
+            current = uv.next.get();
+        }
+
+        // Create new upvalue
+        let new_uv = Upvalue::new_open(slot_ptr);
+        let new_uv_ref = self.gc.alloc(new_uv);
+
+        // Link into list
+        unsafe {
+            (*new_uv_ref.as_ptr()).next.set(current);
+        }
+
+        if let Some(prev_ref) = prev {
+            unsafe {
+                (*prev_ref.as_ptr()).next.set(Some(new_uv_ref));
+            }
+        } else {
+            self.open_upvalues = Some(new_uv_ref);
+        }
+
+        new_uv_ref
+    }
+
+    /// Close all upvalues for stack slots >= level
+    pub fn close_upvalues(&mut self, level: *mut Value) {
+        while let Some(uv_ref) = self.open_upvalues {
+            let uv = unsafe { &*uv_ref.as_ptr() };
+            if let Some(slot) = uv.stack_slot() {
+                if (slot as usize) >= (level as usize) {
+                    // Close this upvalue
+                    uv.close();
+                    self.open_upvalues = uv.next.get();
+                } else {
+                    break;
+                }
+            } else {
+                // Already closed, remove from list
+                self.open_upvalues = uv.next.get();
+            }
+        }
     }
 }
 

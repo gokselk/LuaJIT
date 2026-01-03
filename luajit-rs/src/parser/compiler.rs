@@ -480,8 +480,12 @@ impl<'a> Compiler<'a> {
         self.parse_block()?;
         self.lexer.expect(TokenKind::End)?;
 
-        // Emit FORL
+        // Emit UCLO to close upvalues for the loop variable (slot base+3)
+        // The visible loop variable is at base+3; base, base+1, base+2 are control vars
         let line = self.current_line();
+        self.fs_mut().emit(Instruction::adj(Opcode::UCLO, base + 3, 0), line);
+
+        // Emit FORL
         let pc = self.fs().current_pc();
         let offset = loop_start as i16 - pc as i16 - 1;
         self.fs_mut().emit(Instruction::adj(Opcode::FORL, base, offset), line);
@@ -587,12 +591,15 @@ impl<'a> Compiler<'a> {
         self.parse_block()?;
         self.lexer.expect(TokenKind::End)?;
 
+        // Emit UCLO to close upvalues for loop variables before continuing
+        let line = self.current_line();
+        self.fs_mut().emit(Instruction::adj(Opcode::UCLO, base + 3, 0), line);
+
         // Patch JMP to here (loop test)
         let test_pc = self.fs().current_pc();
         self.patch_jump(jmp_to_test, test_pc)?;
 
         // Emit ITERC (call iterator)
-        let line = self.current_line();
         self.fs_mut().emit(
             Instruction::abc(Opcode::ITERC, base + 3, base, names.len() as u8 + 1),
             line,
