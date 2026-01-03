@@ -647,7 +647,7 @@ impl<'a> Compiler<'a> {
         let line = self.current_line();
         self.fs_mut().emit(Instruction::ad(Opcode::IST, 0, cond_reg as u16), line);
         let pc = self.fs().current_pc();
-        let offset = loop_start as i16 - pc as i16;
+        let offset = loop_start as i16 - pc as i16 - 1;  // -1 accounts for PC increment after JMP
         self.fs_mut().emit(Instruction::adj(Opcode::JMP, 0, offset), line);
 
         // Patch breaks
