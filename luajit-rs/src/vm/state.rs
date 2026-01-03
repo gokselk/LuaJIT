@@ -230,9 +230,9 @@ impl State {
         self.get_value(index).is_truthy()
     }
 
-    /// Get value as number
+    /// Get value as number (with string coercion)
     pub fn to_number(&self, index: i32) -> Option<f64> {
-        self.get_value(index).as_number()
+        self.get_value(index).coerce_to_number()
     }
 
     /// Get value as integer
