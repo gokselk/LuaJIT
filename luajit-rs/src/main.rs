@@ -276,6 +276,14 @@ fn dump_bytecode(state: &mut luajit_rs::vm::State, input: &PathBuf) {
                     }
                 }
 
+                if !proto.upvalues.is_empty() {
+                    println!();
+                    println!("{}-- Upvalues:", pad);
+                    for (i, uv) in proto.upvalues.iter().enumerate() {
+                        println!("{}  UV{}: in_stack={}, index={}", pad, i, uv.in_stack, uv.index);
+                    }
+                }
+
                 // Show child protos (compile-time)
                 for (i, child) in proto.child_protos.iter().enumerate() {
                     println!();

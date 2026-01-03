@@ -882,27 +882,46 @@ impl<'a> Compiler<'a> {
 
         // Check for empty return
         if self.check_block_end()? || self.lexer.check(&TokenKind::Semicolon)? {
+            self.emit_uclo_if_needed();
             self.fs_mut().emit(Instruction::ad(Opcode::RET0, 0, 1), line);
             return Ok(());
         }
 
-        // Parse return values into consecutive registers starting at base
+        // Parse first expression
+        let first_expr = self.parse_expression()?;
+
+        // Check if there's only one return value
+        if !self.lexer.check(&TokenKind::Comma)? {
+            // Single return value - figure out the register first
+            let ret_reg = match first_expr {
+                ExprDesc::Register(r) => r,
+                ExprDesc::Call(base, _, _) => base,
+                _ => self.expr_to_next_reg(first_expr)?,
+            };
+            // Emit UCLO before return if needed (AFTER all code generation)
+            self.emit_uclo_if_needed();
+            self.fs_mut().emit(Instruction::ad(Opcode::RET1, ret_reg, 2), line);
+            return Ok(());
+        }
+
+        // Multiple return values - need consecutive registers
         let base = self.fs().free_reg;
-        let mut count = 0u8;
         let mut value_regs = Vec::new();
 
-        // First pass: parse all expressions and track where they end up
-        loop {
+        // Put first expression into next register
+        let reg = self.expr_to_next_reg(first_expr)?;
+        value_regs.push(reg);
+
+        // Parse remaining expressions
+        while self.lexer.match_token(&TokenKind::Comma)? {
             let expr = self.parse_expression()?;
             let reg = self.expr_to_next_reg(expr)?;
             value_regs.push(reg);
-            count += 1;
-            if !self.lexer.match_token(&TokenKind::Comma)? {
-                break;
-            }
         }
 
-        // Second pass: move values to consecutive slots if needed
+        let count = value_regs.len() as u8;
+
+        // Move values to consecutive slots if needed
         for (i, &reg) in value_regs.iter().enumerate() {
             let target = base + i as u8;
             if reg != target {
@@ -913,13 +932,25 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        if count == 1 {
-            self.fs_mut().emit(Instruction::ad(Opcode::RET1, base, 2), line);
-        } else {
-            self.fs_mut().emit(Instruction::ad(Opcode::RET, base, count as u16 + 1), line);
-        }
+        // Emit UCLO before return if needed (AFTER parsing all expressions)
+        self.emit_uclo_if_needed();
+        self.fs_mut().emit(Instruction::ad(Opcode::RET, base, count as u16 + 1), line);
 
         Ok(())
+    }
+
+    /// Emit UCLO instruction if any locals in current function are captured
+    fn emit_uclo_if_needed(&mut self) {
+        let has_captured = self.fs().locals.iter().any(|l| l.is_captured);
+        if has_captured {
+            let first_captured_slot = self.fs().locals.iter()
+                .filter(|l| l.is_captured)
+                .map(|l| l.slot)
+                .min()
+                .unwrap_or(0);
+            let line = self.current_line();
+            self.fs_mut().emit(Instruction::adj(Opcode::UCLO, first_captured_slot, 0), line);
+        }
     }
 
     /// Parse break statement
@@ -2252,18 +2283,75 @@ impl<'a> Compiler<'a> {
 
     fn expr_to_next_reg(&mut self, expr: ExprDesc) -> LuaResult<u8> {
         let target = self.fs().free_reg;
-        self.expr_to_reg(expr, target)
+        let result = self.expr_to_reg(expr, target)?;
+        // Ensure free_reg is advanced past the target
+        if self.fs().free_reg <= target {
+            self.fs_mut().free_reg = target + 1;
+        }
+        Ok(result)
     }
 
     fn expr_to_reg(&mut self, expr: ExprDesc, target: u8) -> LuaResult<u8> {
-        let reg = self.expr_to_register(expr)?;
-        if reg != target {
-            let line = self.current_line();
-            self.fs_mut().emit(Instruction::ad(Opcode::MOV, target, reg as u16), line);
-            self.fs_mut().free_reg = target + 1;
-            Ok(target)
-        } else {
-            Ok(reg)
+        let line = self.current_line();
+
+        // For simple expressions, emit directly to target register
+        // This avoids unnecessary temp register + MOV sequences
+        match expr {
+            ExprDesc::Register(r) => {
+                if r != target {
+                    self.fs_mut().emit(Instruction::ad(Opcode::MOV, target, r as u16), line);
+                }
+                Ok(target)
+            }
+            ExprDesc::Nil => {
+                self.fs_mut().emit(Instruction::ad(Opcode::KPRI, target, 0), line);
+                Ok(target)
+            }
+            ExprDesc::Bool(b) => {
+                let pri = if b { 2 } else { 1 };
+                self.fs_mut().emit(Instruction::ad(Opcode::KPRI, target, pri), line);
+                Ok(target)
+            }
+            ExprDesc::Number(n) => {
+                if n >= i16::MIN as f64 && n <= i16::MAX as f64 && n.fract() == 0.0 {
+                    self.fs_mut().emit(Instruction::ad(Opcode::KSHORT, target, n as i16 as u16), line);
+                } else {
+                    let idx = self.fs_mut().add_constant(Value::number(n));
+                    self.fs_mut().emit(Instruction::ad(Opcode::KNUM, target, idx as u16), line);
+                }
+                Ok(target)
+            }
+            ExprDesc::String(idx) => {
+                self.fs_mut().emit(Instruction::ad(Opcode::KSTR, target, idx as u16), line);
+                Ok(target)
+            }
+            ExprDesc::Upvalue(uv) => {
+                self.fs_mut().emit(Instruction::ad(Opcode::UGET, target, uv as u16), line);
+                Ok(target)
+            }
+            ExprDesc::Global(idx) => {
+                self.fs_mut().emit(Instruction::ad(Opcode::GGET, target, idx as u16), line);
+                Ok(target)
+            }
+            ExprDesc::Index { table, key, key_is_const } => {
+                if key_is_const {
+                    self.fs_mut().emit(Instruction::abc(Opcode::TGETS, target, table, key), line);
+                } else {
+                    self.fs_mut().emit(Instruction::abc(Opcode::TGETV, target, table, key), line);
+                }
+                Ok(target)
+            }
+            ExprDesc::Call(base, _, _) => {
+                if base != target {
+                    self.fs_mut().emit(Instruction::ad(Opcode::MOV, target, base as u16), line);
+                }
+                Ok(target)
+            }
+            ExprDesc::Vararg => {
+                self.fs_mut().emit(Instruction::abc(Opcode::VARG, target, 2, 0), line);
+                Ok(target)
+            }
+            _ => Err(LuaError::SyntaxError("cannot convert to register".to_string())),
         }
     }
 
