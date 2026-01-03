@@ -333,15 +333,30 @@ impl<'a> Interpreter<'a> {
                     let va = self.state.stack.get(base + a);
                     let vd = self.state.stack.get(base + d);
 
-                    let cmp = match (va.as_number(), vd.as_number()) {
-                        (Some(a), Some(b)) => match op {
+                    let cmp = if let (Some(a), Some(b)) = (va.as_number(), vd.as_number()) {
+                        // Number comparison
+                        match op {
                             Opcode::ISLT => a < b,
                             Opcode::ISGE => a >= b,
                             Opcode::ISLE => a <= b,
                             Opcode::ISGT => a > b,
                             _ => unreachable!(),
-                        },
-                        _ => return Err(LuaError::CompareError(va.lua_type(), vd.lua_type())),
+                        }
+                    } else if let (Some(sa), Some(sb)) = (va.as_string(), vd.as_string()) {
+                        // String comparison
+                        let sa = unsafe { &*sa.as_ptr() };
+                        let sb = unsafe { &*sb.as_ptr() };
+                        let a_bytes = sa.as_bytes();
+                        let b_bytes = sb.as_bytes();
+                        match op {
+                            Opcode::ISLT => a_bytes < b_bytes,
+                            Opcode::ISGE => a_bytes >= b_bytes,
+                            Opcode::ISLE => a_bytes <= b_bytes,
+                            Opcode::ISGT => a_bytes > b_bytes,
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        return Err(LuaError::CompareError(va.lua_type(), vd.lua_type()));
                     };
 
                     if cmp {
