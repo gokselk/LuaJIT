@@ -15,6 +15,7 @@ pub fn register_base(state: &mut State) {
     state.register_function("xpcall", lua_xpcall);
     state.register_function("pairs", lua_pairs);
     state.register_function("ipairs", lua_ipairs);
+    state.register_function("__ipairs_iter", lua_ipairs_iter);
     state.register_function("next", lua_next);
     state.register_function("select", lua_select);
     state.register_function("rawequal", lua_rawequal);
@@ -191,6 +192,27 @@ fn lua_pairs(state: &mut State) -> LuaResult<usize> {
     Ok(3)
 }
 
+/// ipairs iterator function - increments index and returns table[index]
+fn lua_ipairs_iter(state: &mut State) -> LuaResult<usize> {
+    let table = state.get_value(1);
+    let index = state.get_value(2);
+
+    if let (Some(t), Some(i)) = (table.as_table(), index.as_integer()) {
+        let next_i = i + 1;
+        let t = unsafe { &*t.as_ptr() };
+        let val = t.get(&Value::integer(next_i));
+        if !val.is_nil() {
+            state.push(Value::integer(next_i))?;
+            state.push(val)?;
+            Ok(2)
+        } else {
+            Ok(0) // End iteration
+        }
+    } else {
+        Ok(0)
+    }
+}
+
 /// ipairs(t) -> iterator, t, 0
 fn lua_ipairs(state: &mut State) -> LuaResult<usize> {
     let table = state.get_value(1);
@@ -202,9 +224,9 @@ fn lua_ipairs(state: &mut State) -> LuaResult<usize> {
         });
     }
 
-    // For now, return a placeholder
-    // In full implementation, would return ipairs iterator
-    state.push(Value::nil())?;
+    // Return ipairs iterator, table, 0
+    let iter = state.get_global("__ipairs_iter");
+    state.push(iter)?;
     state.push(table)?;
     state.push(Value::integer(0))?;
     Ok(3)

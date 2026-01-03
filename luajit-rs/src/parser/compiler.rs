@@ -29,8 +29,8 @@ enum ExprDesc {
     Relocate(usize),
     /// Jump expression (instruction index)
     Jump(usize),
-    /// Call expression (base register, number of returns)
-    Call(u8, u8),
+    /// Call expression (base register, number of returns, instruction PC)
+    Call(u8, u8, usize),
     /// Vararg expression
     Vararg,
     /// No value (void)
@@ -520,11 +520,18 @@ impl<'a> Compiler<'a> {
 
         // Parse iterator expressions (generator, state, control)
         let mut num_exprs = 0;
-        let mut last_expr_is_call = false;
+        let mut last_call_info: Option<(u8, usize)> = None; // (call_base, call_pc)
         loop {
             let expr = self.parse_expression()?;
-            last_expr_is_call = matches!(expr, ExprDesc::Call(_, _));
-            self.expr_to_next_reg(expr)?;
+            // For calls, keep results in place (don't move them)
+            if let ExprDesc::Call(call_base, _, pc) = &expr {
+                last_call_info = Some((*call_base, *pc));
+                // Don't use expr_to_next_reg for calls - keep results at call_base
+                self.fs_mut().free_reg = *call_base + 1;
+            } else {
+                last_call_info = None;
+                self.expr_to_next_reg(expr)?;
+            }
             num_exprs += 1;
             if !self.lexer.match_token(&TokenKind::Comma)? {
                 break;
@@ -533,16 +540,17 @@ impl<'a> Compiler<'a> {
 
         // If there's only 1 expression and it's a call, patch it to return 3 values
         // (e.g., pairs(t) returns next, t, nil)
-        if num_exprs == 1 && last_expr_is_call {
-            // Patch the CALL instruction to request 3 results instead of 1
-            let call_pc = self.fs().current_pc() - 1;
-            let mut call_instr = self.fs().proto.code[call_pc];
-            // C field: 2 = 1 result, 4 = 3 results
-            call_instr.set_c(4);
-            self.fs_mut().proto.code[call_pc] = call_instr;
-            // Reserve the additional 2 slots for the extra return values
-            self.fs_mut().free_reg = base + 3;
-            num_exprs = 3;
+        if num_exprs == 1 {
+            if let Some((call_base, call_pc)) = last_call_info {
+                // Patch the CALL instruction to request 3 results instead of 1
+                let mut call_instr = self.fs().proto.code[call_pc];
+                // C field: 2 = 1 result, 4 = 3 results
+                call_instr.set_c(4);
+                self.fs_mut().proto.code[call_pc] = call_instr;
+                // Reserve the additional 2 slots for the extra return values
+                self.fs_mut().free_reg = call_base + 3;
+                num_exprs = 3;
+            }
         }
 
         // Adjust to 3 values
@@ -786,19 +794,61 @@ impl<'a> Compiler<'a> {
 
             // Parse initializers
             if self.lexer.match_token(&TokenKind::Eq)? {
-                let mut num_exprs = 0;
+                let mut num_exprs = 0u8;
+                let num_names = names.len() as u8;
+                let mut last_call_pc: Option<usize> = None;
+
                 loop {
                     let expr = self.parse_expression()?;
                     let target = first_slot + num_exprs;
+
+                    // Track if last expression is a call and its PC
+                    if let ExprDesc::Call(_, _, pc) = expr {
+                        last_call_pc = Some(pc);
+                    } else {
+                        last_call_pc = None;
+                    }
+
                     self.expr_to_reg(expr, target)?;
                     num_exprs += 1;
+
                     if !self.lexer.match_token(&TokenKind::Comma)? {
                         break;
                     }
                 }
 
+                // If last expression was a call and we need more values, patch it
+                if let Some(call_pc) = last_call_pc {
+                    if num_exprs < num_names {
+                        let needed = num_names - num_exprs + 1; // +1 because we already counted the first result
+                        let mut call_instr = self.fs().proto.code[call_pc];
+                        let call_base = call_instr.a();
+                        // C field: needed + 1 (since C=0 means MULTRET, C=1 means 0 results, C=2 means 1 result, etc.)
+                        call_instr.set_c(needed + 1);
+                        self.fs_mut().proto.code[call_pc] = call_instr;
+
+                        // If the call results aren't at the right position, we need to move them
+                        // The first result was already moved by expr_to_reg (via MOV)
+                        // But additional results are at call_base+1, call_base+2, etc.
+                        // They need to be at first_slot+1, first_slot+2, etc.
+                        let target_base = first_slot + num_exprs - 1; // -1 because first was already moved
+                        let line = self.current_line();
+                        for i in 1..needed {
+                            let src = call_base + i;
+                            let dst = target_base + i;
+                            if src != dst {
+                                self.fs_mut().emit(Instruction::ad(Opcode::MOV, dst, src as u16), line);
+                            }
+                        }
+
+                        // Update free_reg to account for additional results
+                        self.fs_mut().free_reg = first_slot + num_names;
+                        num_exprs = num_names; // All slots filled by call
+                    }
+                }
+
                 // Fill remaining with nil
-                while num_exprs < names.len() as u8 {
+                while num_exprs < num_names {
                     let line = self.current_line();
                     let reg = first_slot + num_exprs;
                     self.fs_mut().emit(Instruction::ad(Opcode::KPRI, reg, 0), line);
@@ -897,7 +947,7 @@ impl<'a> Compiler<'a> {
         } else {
             // Function call (must be a call expression)
             match expr {
-                ExprDesc::Call(_, _) => {} // Already emitted
+                ExprDesc::Call(_, _, _) => {} // Already emitted
                 _ => return Err(LuaError::SyntaxError("syntax error".to_string())),
             }
         }
@@ -918,21 +968,61 @@ impl<'a> Compiler<'a> {
         // Save free_reg to restore after assignment (temporaries not needed)
         let saved_free_reg = self.fs().free_reg;
 
-        // Parse values - track where each value ends up
+        // Parse values - track where each value ends up and if last is a call
         let mut value_regs = Vec::new();
+        let mut last_call_info: Option<(u8, usize)> = None; // (base_reg, call_pc)
 
         loop {
             let expr = self.parse_expression()?;
-            let reg = self.expr_to_next_reg(expr)?;
-            value_regs.push(reg);
+            // Track if this expression is a call
+            if let ExprDesc::Call(base, _, pc) = &expr {
+                last_call_info = Some((*base, *pc));
+                // For calls, don't move the result - keep it at call_base
+                // This is important for multi-return handling
+                value_regs.push(*base);
+                self.fs_mut().free_reg = *base + 1;
+            } else {
+                last_call_info = None;
+                let reg = self.expr_to_next_reg(expr)?;
+                value_regs.push(reg);
+            }
             if !self.lexer.match_token(&TokenKind::Comma)? {
                 break;
             }
         }
 
+        let num_targets = targets.len();
+        let num_values = value_regs.len();
+
+        // If we have more targets than values and last value is a call,
+        // patch the call to return more results
+        if num_targets > num_values {
+            if let Some((call_base, call_pc)) = last_call_info {
+                let extra_needed = num_targets - num_values + 1;
+                // Patch CALL to return more results (C = nresults + 1)
+                let mut call_instr = self.fs().proto.code[call_pc];
+                call_instr.set_c((extra_needed + 1) as u8);
+                self.fs_mut().proto.code[call_pc] = call_instr;
+                // Add the additional result registers to value_regs
+                for i in 1..extra_needed {
+                    value_regs.push(call_base + i as u8);
+                }
+                self.fs_mut().free_reg = call_base + extra_needed as u8;
+            }
+        }
+
         // Assign values to targets
         for (i, target) in targets.iter().enumerate() {
-            let val_reg = value_regs.get(i).copied().unwrap_or(0);
+            // If we don't have a value for this target, use nil
+            let val_reg = if i < value_regs.len() {
+                value_regs[i]
+            } else {
+                // Emit nil for missing values
+                let line = self.current_line();
+                let reg = self.fs_mut().reserve_reg();
+                self.fs_mut().emit(Instruction::ad(Opcode::KPRI, reg, 0), line);
+                reg
+            };
             let line = self.current_line();
 
             match target {
@@ -1432,13 +1522,14 @@ impl<'a> Compiler<'a> {
         };
 
         // Emit CALL
+        let call_pc = self.fs().current_pc();
         self.fs_mut().emit(
             Instruction::abc(Opcode::CALL, base, num_args + 1, 2), // 2 = 1 result + 1
             line,
         );
         self.fs_mut().free_reg = base + 1;
 
-        Ok(ExprDesc::Call(base, 1))
+        Ok(ExprDesc::Call(base, 1, call_pc))
     }
 
     /// Parse method call: obj:method(args) - obj is passed as first argument
@@ -1494,13 +1585,14 @@ impl<'a> Compiler<'a> {
         };
 
         // Emit CALL
+        let call_pc = self.fs().current_pc();
         self.fs_mut().emit(
             Instruction::abc(Opcode::CALL, base, num_args + 1, 2),
             line,
         );
         self.fs_mut().free_reg = base + 1;
 
-        Ok(ExprDesc::Call(base, 1))
+        Ok(ExprDesc::Call(base, 1, call_pc))
     }
 
     fn parse_primary_expr(&mut self) -> LuaResult<ExprDesc> {
@@ -1935,7 +2027,7 @@ impl<'a> Compiler<'a> {
                 }
                 Ok(reg)
             }
-            ExprDesc::Call(base, _) => Ok(base),
+            ExprDesc::Call(base, _, _) => Ok(base),
             ExprDesc::Vararg => {
                 let reg = self.fs_mut().reserve_reg();
                 let line = self.current_line();

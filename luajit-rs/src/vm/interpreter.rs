@@ -677,10 +677,12 @@ impl<'a> Interpreter<'a> {
                 }
 
                 Opcode::ITERC => {
-                    // Call iterator: A, A+1, A+2 = f(s, var)
-                    let func = self.state.stack.get(base + a - 3);
-                    let state_val = self.state.stack.get(base + a - 2);
-                    let var = self.state.stack.get(base + a - 1);
+                    // Call iterator: A = where to put results, B = iterator base (func, state, var)
+                    let b = instr.b() as usize;
+                    let iter_base = base + b;
+                    let func = self.state.stack.get(iter_base);
+                    let state_val = self.state.stack.get(iter_base + 1);
+                    let var = self.state.stack.get(iter_base + 2);
 
                     // Set up call: base+a = func, base+a+1 = state, base+a+2 = var
                     self.state.stack.set(base + a, func);
