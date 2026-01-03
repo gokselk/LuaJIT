@@ -63,6 +63,14 @@ pub fn register_math(state: &mut State) {
     add_func(state, math, "tointeger", math_tointeger);
     add_func(state, math, "type", math_type);
     add_func(state, math, "ult", math_ult);
+    add_func(state, math, "atan2", math_atan2);
+    add_func(state, math, "ldexp", math_ldexp);
+    add_func(state, math, "frexp", math_frexp);
+    add_func(state, math, "log10", math_log10);
+    add_func(state, math, "pow", math_pow);
+    add_func(state, math, "cosh", math_cosh);
+    add_func(state, math, "sinh", math_sinh);
+    add_func(state, math, "tanh", math_tanh);
 
     state.set_global("math", Value::table(math));
 }
@@ -301,5 +309,78 @@ fn math_ult(state: &mut State) -> LuaResult<usize> {
     let m = get_num(state, 1)? as u64;
     let n = get_num(state, 2)? as u64;
     state.push(Value::boolean(m < n))?;
+    Ok(1)
+}
+
+fn math_atan2(state: &mut State) -> LuaResult<usize> {
+    let y = get_num(state, 1)?;
+    let x = get_num(state, 2)?;
+    state.push(Value::number(y.atan2(x)))?;
+    Ok(1)
+}
+
+fn math_ldexp(state: &mut State) -> LuaResult<usize> {
+    let m = get_num(state, 1)?;
+    let e = get_num(state, 2)? as i32;
+    // ldexp(m, e) = m * 2^e
+    state.push(Value::number(m * 2f64.powi(e)))?;
+    Ok(1)
+}
+
+fn math_frexp(state: &mut State) -> LuaResult<usize> {
+    let n = get_num(state, 1)?;
+    if n == 0.0 {
+        state.push(Value::number(0.0))?;
+        state.push(Value::number(0.0))?;
+    } else {
+        let (mantissa, exponent, _sign) = decode_float(n);
+        let m = n / 2f64.powi(exponent);
+        state.push(Value::number(m))?;
+        state.push(Value::number(exponent as f64))?;
+    }
+    Ok(2)
+}
+
+fn decode_float(n: f64) -> (u64, i32, i8) {
+    let bits = n.to_bits();
+    let sign: i8 = if bits >> 63 == 0 { 1 } else { -1 };
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let mantissa = bits & 0xfffffffffffff;
+
+    if exponent == 0 {
+        (mantissa, 1 - 1023 - 52, sign)
+    } else {
+        (mantissa | 0x10000000000000, exponent - 1023 - 52, sign)
+    }
+}
+
+fn math_log10(state: &mut State) -> LuaResult<usize> {
+    let n = get_num(state, 1)?;
+    state.push(Value::number(n.log10()))?;
+    Ok(1)
+}
+
+fn math_pow(state: &mut State) -> LuaResult<usize> {
+    let x = get_num(state, 1)?;
+    let y = get_num(state, 2)?;
+    state.push(Value::number(x.powf(y)))?;
+    Ok(1)
+}
+
+fn math_cosh(state: &mut State) -> LuaResult<usize> {
+    let n = get_num(state, 1)?;
+    state.push(Value::number(n.cosh()))?;
+    Ok(1)
+}
+
+fn math_sinh(state: &mut State) -> LuaResult<usize> {
+    let n = get_num(state, 1)?;
+    state.push(Value::number(n.sinh()))?;
+    Ok(1)
+}
+
+fn math_tanh(state: &mut State) -> LuaResult<usize> {
+    let n = get_num(state, 1)?;
+    state.push(Value::number(n.tanh()))?;
     Ok(1)
 }
