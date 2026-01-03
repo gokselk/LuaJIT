@@ -112,11 +112,8 @@ impl State {
     }
 
     /// Get a global variable
-    pub fn get_global(&self, name: &str) -> Value {
-        let key = {
-            let hash = crate::value::string::LuaString::compute_hash(name.as_bytes());
-            Value::number(hash as f64)
-        };
+    pub fn get_global(&mut self, name: &str) -> Value {
+        let key = self.intern_string(name);
         unsafe { (*self.globals.as_ptr()).get(&key) }
     }
 
@@ -138,42 +135,65 @@ impl State {
         self.stack.pop()
     }
 
-    /// Get stack top
+    /// Get stack top (number of elements in current frame)
     pub fn get_top(&self) -> usize {
-        self.stack.top()
+        let base = self.stack.base();
+        let top = self.stack.top();
+        if top > base { top - base } else { 0 }
     }
 
-    /// Set stack top
-    pub fn set_top(&mut self, top: usize) {
-        self.stack.set_top(top);
+    /// Set stack top (relative to base)
+    pub fn set_top(&mut self, n: usize) {
+        let base = self.stack.base();
+        self.stack.set_top(base + n);
     }
 
-    /// Get value at stack index (1-based, negative from top)
+    /// Get value at stack index (1-based relative to base, negative from top)
     pub fn get_value(&self, index: i32) -> Value {
-        let abs_index = self.abs_index(index);
-        if abs_index > 0 {
-            self.stack.get(abs_index as usize - 1)
+        let base = self.stack.base();
+        let top = self.stack.top();
+        let abs_idx = if index > 0 {
+            // Positive: 1-based from base
+            base + (index as usize) - 1
+        } else if index < 0 {
+            // Negative: from top
+            (top as i32 + index) as usize
+        } else {
+            return Value::nil();
+        };
+        if abs_idx < top {
+            self.stack.get(abs_idx)
         } else {
             Value::nil()
         }
     }
 
-    /// Set value at stack index
+    /// Set value at stack index (1-based relative to base, negative from top)
     pub fn set_value(&mut self, index: i32, value: Value) {
-        let abs_index = self.abs_index(index);
-        if abs_index > 0 {
-            self.stack.set(abs_index as usize - 1, value);
+        let base = self.stack.base();
+        let top = self.stack.top();
+        let abs_idx = if index > 0 {
+            base + (index as usize) - 1
+        } else if index < 0 {
+            (top as i32 + index) as usize
+        } else {
+            return;
+        };
+        if abs_idx < top {
+            self.stack.set(abs_idx, value);
         }
     }
 
-    /// Convert relative index to absolute
+    /// Convert relative index to absolute (1-based result for compatibility)
     fn abs_index(&self, index: i32) -> i32 {
+        let base = self.stack.base();
+        let top = self.stack.top();
         if index > 0 {
-            index
+            base as i32 + index
         } else if index == 0 {
             0
         } else {
-            self.stack.top() as i32 + index + 1
+            top as i32 + index + 1
         }
     }
 

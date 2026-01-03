@@ -109,10 +109,9 @@ impl FunctionState {
     }
 
     fn add_string_constant(&mut self, s: &str) -> usize {
-        // For now, store as number hash (we'd need string interning)
-        // In real implementation, this would intern the string
-        let hash = s.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-        self.proto.add_constant(Value::number(hash as f64))
+        // Store the actual string in proto.string_constants
+        // The interpreter will intern it at runtime
+        self.proto.add_string_constant(s)
     }
 
     fn current_pc(&self) -> usize {

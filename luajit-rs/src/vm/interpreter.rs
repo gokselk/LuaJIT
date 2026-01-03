@@ -104,7 +104,9 @@ impl<'a> Interpreter<'a> {
         let old_base = self.state.stack.base();
         let old_top = self.state.stack.top();
 
+        // Set base and top for the native call
         self.state.stack.set_base(base);
+        self.state.stack.set_top(base + nargs);
 
         // Create native frame
         let frame = CallFrame::new_native(base, nresults);
@@ -203,9 +205,17 @@ impl<'a> Interpreter<'a> {
 
                 Opcode::KSTR => {
                     let d = instr.d() as usize;
+                    // Get string constant and intern it at runtime
                     let frame = self.state.call_stack.current().unwrap();
-                    let val = frame.get_constant(d);
-                    self.state.stack.set(base + a, val);
+                    let string_val = if let Some(s) = frame.get_string_constant(d) {
+                        // Need to copy to avoid borrow issues
+                        let s = s.to_string();
+                        drop(frame);
+                        self.state.intern_string(&s)
+                    } else {
+                        Value::nil()
+                    };
+                    self.state.stack.set(base + a, string_val);
                 }
 
                 // Arithmetic operations
@@ -380,7 +390,14 @@ impl<'a> Interpreter<'a> {
                     let c = instr.c() as usize;
                     let table = self.state.stack.get(base + b);
                     let frame = self.state.call_stack.current().unwrap();
-                    let key = frame.get_constant(c);
+                    // Get string constant and intern it for key
+                    let key = if let Some(s) = frame.get_string_constant(c) {
+                        let s = s.to_string();
+                        drop(frame);
+                        self.state.intern_string(&s)
+                    } else {
+                        frame.get_constant(c)
+                    };
 
                     if let Some(t) = table.as_table() {
                         let val = unsafe { (*t.as_ptr()).get(&key) };
@@ -423,7 +440,14 @@ impl<'a> Interpreter<'a> {
                     let table = self.state.stack.get(base + a);
                     let val = self.state.stack.get(base + b);
                     let frame = self.state.call_stack.current().unwrap();
-                    let key = frame.get_constant(c);
+                    // Get string constant and intern it for key
+                    let key = if let Some(s) = frame.get_string_constant(c) {
+                        let s = s.to_string();
+                        drop(frame);
+                        self.state.intern_string(&s)
+                    } else {
+                        frame.get_constant(c)
+                    };
 
                     if let Some(t) = table.as_table() {
                         unsafe { (*t.as_ptr()).set(key, val) };
@@ -448,18 +472,30 @@ impl<'a> Interpreter<'a> {
                 // Global operations
                 Opcode::GGET => {
                     let d = instr.d() as usize;
+                    // Get string constant, intern it, and look up in globals
                     let frame = self.state.call_stack.current().unwrap();
-                    let key = frame.get_constant(d);
-                    let val = unsafe { (*self.state.globals.as_ptr()).get(&key) };
+                    let val = if let Some(s) = frame.get_string_constant(d) {
+                        let s = s.to_string();
+                        drop(frame);
+                        let key = self.state.intern_string(&s);
+                        unsafe { (*self.state.globals.as_ptr()).get(&key) }
+                    } else {
+                        Value::nil()
+                    };
                     self.state.stack.set(base + a, val);
                 }
 
                 Opcode::GSET => {
                     let d = instr.d() as usize;
                     let val = self.state.stack.get(base + a);
+                    // Get string constant and intern it for global key
                     let frame = self.state.call_stack.current().unwrap();
-                    let key = frame.get_constant(d);
-                    unsafe { (*self.state.globals.as_ptr()).set(key, val) };
+                    if let Some(s) = frame.get_string_constant(d) {
+                        let s = s.to_string();
+                        drop(frame);
+                        let key = self.state.intern_string(&s);
+                        unsafe { (*self.state.globals.as_ptr()).set(key, val) };
+                    }
                 }
 
                 // Upvalue operations

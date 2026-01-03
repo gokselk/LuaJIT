@@ -93,6 +93,12 @@ impl CallFrame {
             .and_then(|p| p.constants.get(index).copied())
             .unwrap_or(Value::nil())
     }
+
+    /// Get a string constant from the prototype
+    pub fn get_string_constant(&self, index: usize) -> Option<&str> {
+        self.proto()
+            .and_then(|p| p.string_constants.get(index).map(|s| s.as_str()))
+    }
 }
 
 /// Call stack for the VM

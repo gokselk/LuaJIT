@@ -16,10 +16,10 @@ use ordered_float::OrderedFloat;
 const NAN_TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
 const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
-/// Quiet NaN with tag space
-const QNAN_BASE: u64 = 0x7FF8_0000_0000_0000;
+/// Quiet NaN with tag space (using 0x7FF0 to leave room for 4-bit tags)
+const QNAN_BASE: u64 = 0x7FF0_0000_0000_0000;
 
-/// Type tags (added to QNAN_BASE)
+/// Type tags (added to QNAN_BASE) - must not overlap with QNAN_BASE lower nibble
 const TAG_NIL: u64      = 0x0001_0000_0000_0000;
 const TAG_FALSE: u64    = 0x0002_0000_0000_0000;
 const TAG_TRUE: u64     = 0x0003_0000_0000_0000;
@@ -180,21 +180,25 @@ impl Value {
     #[inline]
     pub fn lua_type(&self) -> LuaType {
         if self.is_float() {
-            LuaType::Number
-        } else {
-            let tag = (self.bits >> 48) & 0xFFFF;
-            match tag & 0x000F {
-                0x1 => LuaType::Nil,
-                0x2 | 0x3 => LuaType::Boolean,
-                0x4 => LuaType::LightUserdata,
-                0x5 => LuaType::String,
-                0x6 => LuaType::Table,
-                0x7 => LuaType::Function,
-                0x8 => LuaType::Userdata,
-                0x9 => LuaType::Thread,
-                0xA => LuaType::Number, // Integer
-                _ => LuaType::Nil,
-            }
+            return LuaType::Number;
+        }
+
+        // Check tagged value type by matching the full tag pattern
+        let tag = (self.bits >> 48) & 0xFFFF;
+        const QNAN_UPPER: u64 = (QNAN_BASE >> 48);
+
+        match tag {
+            x if x == QNAN_UPPER | 0x0001 => LuaType::Nil,
+            x if x == QNAN_UPPER | 0x0002 => LuaType::Boolean, // false
+            x if x == QNAN_UPPER | 0x0003 => LuaType::Boolean, // true
+            x if x == QNAN_UPPER | 0x0004 => LuaType::LightUserdata,
+            x if x == QNAN_UPPER | 0x0005 => LuaType::String,
+            x if x == QNAN_UPPER | 0x0006 => LuaType::Table,
+            x if x == QNAN_UPPER | 0x0007 => LuaType::Function,
+            x if x == QNAN_UPPER | 0x0008 => LuaType::Userdata,
+            x if x == QNAN_UPPER | 0x0009 => LuaType::Thread,
+            x if x == QNAN_UPPER | 0x000A => LuaType::Number, // Integer
+            _ => LuaType::Nil,
         }
     }
 

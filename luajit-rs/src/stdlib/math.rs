@@ -9,6 +9,14 @@ pub fn register_math(state: &mut State) {
     // Create math table
     let math = state.create_table(0, 32);
 
+    // Helper to add a function to the math table
+    let add_func = |state: &mut State, math: crate::value::GcRef<crate::value::Table>, name: &str, func: crate::value::NativeFn| {
+        let native = crate::value::NativeFunction::new(func);
+        let func_ref = state.gc.alloc(crate::value::Function::Native(native));
+        let key = state.intern_string(name);
+        unsafe { (*math.as_ptr()).set(key, Value::function(func_ref)); }
+    };
+
     // Constants
     unsafe {
         (*math.as_ptr()).set(state.intern_string("pi"), Value::number(PI));
@@ -17,29 +25,30 @@ pub fn register_math(state: &mut State) {
         (*math.as_ptr()).set(state.intern_string("mininteger"), Value::number(i64::MIN as f64));
     }
 
-    state.register_function("abs", math_abs);
-    state.register_function("acos", math_acos);
-    state.register_function("asin", math_asin);
-    state.register_function("atan", math_atan);
-    state.register_function("ceil", math_ceil);
-    state.register_function("cos", math_cos);
-    state.register_function("deg", math_deg);
-    state.register_function("exp", math_exp);
-    state.register_function("floor", math_floor);
-    state.register_function("fmod", math_fmod);
-    state.register_function("log", math_log);
-    state.register_function("max", math_max);
-    state.register_function("min", math_min);
-    state.register_function("modf", math_modf);
-    state.register_function("rad", math_rad);
-    state.register_function("random", math_random);
-    state.register_function("randomseed", math_randomseed);
-    state.register_function("sin", math_sin);
-    state.register_function("sqrt", math_sqrt);
-    state.register_function("tan", math_tan);
-    state.register_function("tointeger", math_tointeger);
-    state.register_function("type", math_type);
-    state.register_function("ult", math_ult);
+    // Add functions to math table (not as globals)
+    add_func(state, math, "abs", math_abs);
+    add_func(state, math, "acos", math_acos);
+    add_func(state, math, "asin", math_asin);
+    add_func(state, math, "atan", math_atan);
+    add_func(state, math, "ceil", math_ceil);
+    add_func(state, math, "cos", math_cos);
+    add_func(state, math, "deg", math_deg);
+    add_func(state, math, "exp", math_exp);
+    add_func(state, math, "floor", math_floor);
+    add_func(state, math, "fmod", math_fmod);
+    add_func(state, math, "log", math_log);
+    add_func(state, math, "max", math_max);
+    add_func(state, math, "min", math_min);
+    add_func(state, math, "modf", math_modf);
+    add_func(state, math, "rad", math_rad);
+    add_func(state, math, "random", math_random);
+    add_func(state, math, "randomseed", math_randomseed);
+    add_func(state, math, "sin", math_sin);
+    add_func(state, math, "sqrt", math_sqrt);
+    add_func(state, math, "tan", math_tan);
+    add_func(state, math, "tointeger", math_tointeger);
+    add_func(state, math, "type", math_type);
+    add_func(state, math, "ult", math_ult);
 
     state.set_global("math", Value::table(math));
 }

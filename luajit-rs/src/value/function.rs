@@ -17,6 +17,8 @@ pub struct Proto {
     pub code: Vec<Instruction>,
     /// Constants used by the function
     pub constants: Vec<Value>,
+    /// String constants (stored as raw bytes, interned at runtime)
+    pub string_constants: Vec<String>,
     /// Nested function prototypes
     pub protos: Vec<GcRef<Proto>>,
     /// Upvalue descriptors
@@ -74,6 +76,7 @@ impl Proto {
             gc: GcHeader::new(10), // LuaType::Proto
             code: Vec::new(),
             constants: Vec::new(),
+            string_constants: Vec::new(),
             protos: Vec::new(),
             upvalues: Vec::new(),
             lineinfo: Vec::new(),
@@ -87,6 +90,19 @@ impl Proto {
             line_defined: 0,
             last_line_defined: 0,
         }
+    }
+
+    /// Add a string constant and return its index
+    pub fn add_string_constant(&mut self, s: &str) -> usize {
+        // Check if string already exists
+        for (i, existing) in self.string_constants.iter().enumerate() {
+            if existing == s {
+                return i;
+            }
+        }
+        let idx = self.string_constants.len();
+        self.string_constants.push(s.to_string());
+        idx
     }
 
     /// Get the line number for a given bytecode index

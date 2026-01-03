@@ -10,6 +10,7 @@ use std::fmt;
 use rustc_hash::FxHasher;
 
 /// An interned Lua string.
+#[repr(C)]
 pub struct LuaString {
     /// GC header
     pub gc: GcHeader,
