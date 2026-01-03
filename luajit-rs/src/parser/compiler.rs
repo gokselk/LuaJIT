@@ -1239,17 +1239,28 @@ impl<'a> Compiler<'a> {
             let base = self.fs().free_reg;
             self.expr_to_reg(left, base)?;
             self.fs_mut().free_reg = base + 1;
-            let mut last_reg = base;
+            let mut operand_count = 1u8;
 
             loop {
+                // Save the target register for this operand
+                let target_reg = base + operand_count;
+
+                // Parse the right operand (may use many temporary registers)
                 let right = self.parse_add_expr()?;
-                last_reg = self.expr_to_next_reg(right)?;
+
+                // Force the result into the consecutive register slot
+                self.expr_to_reg(right, target_reg)?;
+
+                // Reset free_reg to ensure next operand goes in next consecutive slot
+                self.fs_mut().free_reg = target_reg + 1;
+                operand_count += 1;
 
                 if !self.lexer.match_token(&TokenKind::DotDot)? {
                     break;
                 }
             }
 
+            let last_reg = base + operand_count - 1;
             let line = self.current_line();
             self.fs_mut().emit(
                 Instruction::abc(Opcode::CAT, base, base, last_reg),
@@ -1400,17 +1411,28 @@ impl<'a> Compiler<'a> {
             let base = self.fs().free_reg;
             self.expr_to_reg(left, base)?;
             self.fs_mut().free_reg = base + 1;
-            let mut last_reg = base;
+            let mut operand_count = 1u8;
 
             loop {
+                // Save the target register for this operand
+                let target_reg = base + operand_count;
+
+                // Parse the right operand (may use many temporary registers)
                 let right = self.parse_add_expr()?;
-                last_reg = self.expr_to_next_reg(right)?;
+
+                // Force the result into the consecutive register slot
+                self.expr_to_reg(right, target_reg)?;
+
+                // Reset free_reg to ensure next operand goes in next consecutive slot
+                self.fs_mut().free_reg = target_reg + 1;
+                operand_count += 1;
 
                 if !self.lexer.match_token(&TokenKind::DotDot)? {
                     break;
                 }
             }
 
+            let last_reg = base + operand_count - 1;
             let line = self.current_line();
             self.fs_mut().emit(
                 Instruction::abc(Opcode::CAT, base, base, last_reg),
