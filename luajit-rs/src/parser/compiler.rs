@@ -1328,22 +1328,102 @@ impl<'a> Compiler<'a> {
     }
 
     fn resolve_name(&mut self, name: &str) -> LuaResult<ExprDesc> {
-        // Check locals
+        // Check locals in current function
         if let Some(slot) = self.fs().find_local(name) {
             return Ok(ExprDesc::Register(slot));
         }
 
-        // Check upvalues
-        // (simplified - would need parent function access)
+        // Check if already captured as upvalue
         for (i, (uv_name, _, _)) in self.fs().upvalues.iter().enumerate() {
             if uv_name == name {
                 return Ok(ExprDesc::Upvalue(i as u8));
             }
         }
 
+        // Try to capture from parent scopes
+        if let Some(uv_idx) = self.capture_upvalue(name) {
+            return Ok(ExprDesc::Upvalue(uv_idx));
+        }
+
         // Global
         let idx = self.fs_mut().add_string_constant(name);
         Ok(ExprDesc::Global(idx))
+    }
+
+    /// Try to capture a variable from parent scopes as an upvalue
+    fn capture_upvalue(&mut self, name: &str) -> Option<u8> {
+        let num_functions = self.functions.len();
+        if num_functions < 2 {
+            return None;
+        }
+
+        // Search from innermost parent outward
+        // First, find which level has the variable
+        let mut found_level = None;
+        let mut in_stack = false;
+        let mut index = 0u8;
+
+        for level in (0..num_functions - 1).rev() {
+            let fs = &self.functions[level];
+
+            // Check if it's a local at this level
+            if let Some(slot) = fs.find_local(name) {
+                found_level = Some(level);
+                in_stack = true;
+                index = slot;
+                break;
+            }
+
+            // Check if it's already an upvalue at this level
+            for (i, (uv_name, _, _)) in fs.upvalues.iter().enumerate() {
+                if uv_name == name {
+                    found_level = Some(level);
+                    in_stack = false;
+                    index = i as u8;
+                    break;
+                }
+            }
+            if found_level.is_some() {
+                break;
+            }
+        }
+
+        let found_level = found_level?;
+
+        // Now propagate the upvalue through all intermediate levels
+        // If found at level N, we need to add upvalues from N+1 to current
+        let mut current_in_stack = in_stack;
+        let mut current_index = index;
+
+        // Mark the local as captured if it's a local
+        if in_stack {
+            for local in &mut self.functions[found_level].locals {
+                if local.name == name {
+                    local.is_captured = true;
+                    break;
+                }
+            }
+        }
+
+        // Propagate through intermediate levels
+        for level in (found_level + 1)..num_functions {
+            let fs = &mut self.functions[level];
+
+            // Add upvalue to this level
+            let uv_idx = fs.upvalues.len() as u8;
+            fs.upvalues.push((name.to_string(), current_in_stack, current_index));
+            fs.proto.upvalues.push(UpvalueDesc {
+                in_stack: current_in_stack,
+                index: current_index,
+                name: None,
+            });
+
+            // For next level, reference this level's upvalue
+            current_in_stack = false;
+            current_index = uv_idx;
+        }
+
+        Some(current_index)
     }
 
     fn parse_table_constructor(&mut self) -> LuaResult<ExprDesc> {

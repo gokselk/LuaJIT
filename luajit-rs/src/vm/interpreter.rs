@@ -750,10 +750,34 @@ impl<'a> Interpreter<'a> {
                 Opcode::FNEW => {
                     let d = instr.d() as usize;
                     let frame = self.state.call_stack.current().unwrap();
-                    if let Some(closure) = frame.closure {
-                        let proto = unsafe { &*(*closure.as_ptr()).proto.as_ptr() };
-                        if let Some(child_proto) = proto.protos.get(d) {
-                            let new_closure = Closure::new(*child_proto, Some(self.state.globals));
+                    if let Some(parent_closure) = frame.closure {
+                        let parent_proto = unsafe { &*(*parent_closure.as_ptr()).proto.as_ptr() };
+                        if let Some(child_proto_ref) = parent_proto.protos.get(d) {
+                            let child_proto = unsafe { &*child_proto_ref.as_ptr() };
+                            let mut new_closure = Closure::new(*child_proto_ref, Some(self.state.globals));
+
+                            // Set up upvalues based on the child proto's upvalue descriptors
+                            for uv_desc in &child_proto.upvalues {
+                                let upvalue = if uv_desc.in_stack {
+                                    // Capture from current stack frame
+                                    let slot_ptr = self.state.stack.slot_ptr(base + uv_desc.index as usize);
+                                    let uv = Upvalue::new_open(slot_ptr);
+                                    self.state.gc.alloc(uv)
+                                } else {
+                                    // Get from parent closure's upvalues
+                                    unsafe {
+                                        let parent = &*parent_closure.as_ptr();
+                                        if let Some(uv) = parent.upvalues.get(uv_desc.index as usize) {
+                                            *uv
+                                        } else {
+                                            // Fallback: create a nil upvalue
+                                            self.state.gc.alloc(Upvalue::new_closed(Value::nil()))
+                                        }
+                                    }
+                                };
+                                new_closure.upvalues.push(upvalue);
+                            }
+
                             let func = Function::Lua(new_closure);
                             let func_ref = self.state.gc.alloc(func);
                             self.state.stack.set(base + a, Value::function(func_ref));
