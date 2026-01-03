@@ -1,0 +1,7 @@
+# Language tests
+assignment.lua
+operators.lua
+control.lua
+functions.lua
+tables.lua
+closures.lua

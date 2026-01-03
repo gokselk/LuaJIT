@@ -920,8 +920,9 @@ impl<'a> Compiler<'a> {
             let left_reg = self.expr_to_register(left)?;
             let line = self.current_line();
 
-            // Short-circuit: if true, jump past right side
-            self.fs_mut().emit(Instruction::ad(Opcode::IST, 0, left_reg as u16), line);
+            // Short-circuit: if truthy, skip right side (keep left)
+            // ISF skips next instruction if falsy, so if NOT falsy (truthy), we execute JMP
+            self.fs_mut().emit(Instruction::ad(Opcode::ISF, 0, left_reg as u16), line);
             let skip_jump = self.fs_mut().emit(Instruction::adj(Opcode::JMP, 0, 0), line);
 
             let right = self.parse_and_expr()?;
@@ -951,8 +952,9 @@ impl<'a> Compiler<'a> {
             let left_reg = self.expr_to_register(left)?;
             let line = self.current_line();
 
-            // Short-circuit: if false, jump past right side
-            self.fs_mut().emit(Instruction::ad(Opcode::ISF, 0, left_reg as u16), line);
+            // Short-circuit: if falsy, skip right side (keep left)
+            // IST skips next instruction if truthy, so if NOT truthy (falsy), we execute JMP
+            self.fs_mut().emit(Instruction::ad(Opcode::IST, 0, left_reg as u16), line);
             let skip_jump = self.fs_mut().emit(Instruction::adj(Opcode::JMP, 0, 0), line);
 
             let right = self.parse_compare_expr()?;
