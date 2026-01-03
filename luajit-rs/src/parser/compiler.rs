@@ -1228,13 +1228,16 @@ impl<'a> Compiler<'a> {
         let mut left = self.parse_add_expr()?;
 
         if self.lexer.match_token(&TokenKind::DotDot)? {
-            let left_reg = self.expr_to_register(left)?;
-            let mut right_count = 0u8;
+            // CAT requires all operands in consecutive registers B..C
+            // First, move left operand to next free reg to start consecutive block
+            let base = self.fs().free_reg;
+            self.expr_to_reg(left, base)?;
+            self.fs_mut().free_reg = base + 1;
+            let mut last_reg = base;
 
             loop {
                 let right = self.parse_add_expr()?;
-                self.expr_to_next_reg(right)?;
-                right_count += 1;
+                last_reg = self.expr_to_next_reg(right)?;
 
                 if !self.lexer.match_token(&TokenKind::DotDot)? {
                     break;
@@ -1243,12 +1246,12 @@ impl<'a> Compiler<'a> {
 
             let line = self.current_line();
             self.fs_mut().emit(
-                Instruction::abc(Opcode::CAT, left_reg, left_reg, left_reg + right_count),
+                Instruction::abc(Opcode::CAT, base, base, last_reg),
                 line,
             );
-            self.fs_mut().free_reg = left_reg + 1;
+            self.fs_mut().free_reg = base + 1;
 
-            left = ExprDesc::Register(left_reg);
+            left = ExprDesc::Register(base);
         }
 
         Ok(left)
@@ -1386,13 +1389,16 @@ impl<'a> Compiler<'a> {
 
         // Handle concat operator
         if self.lexer.match_token(&TokenKind::DotDot)? {
-            let left_reg = self.expr_to_register(left)?;
-            let mut right_count = 0u8;
+            // CAT requires all operands in consecutive registers B..C
+            // First, move left operand to next free reg to start consecutive block
+            let base = self.fs().free_reg;
+            self.expr_to_reg(left, base)?;
+            self.fs_mut().free_reg = base + 1;
+            let mut last_reg = base;
 
             loop {
                 let right = self.parse_add_expr()?;
-                self.expr_to_next_reg(right)?;
-                right_count += 1;
+                last_reg = self.expr_to_next_reg(right)?;
 
                 if !self.lexer.match_token(&TokenKind::DotDot)? {
                     break;
@@ -1401,11 +1407,11 @@ impl<'a> Compiler<'a> {
 
             let line = self.current_line();
             self.fs_mut().emit(
-                Instruction::abc(Opcode::CAT, left_reg, left_reg, left_reg + right_count),
+                Instruction::abc(Opcode::CAT, base, base, last_reg),
                 line,
             );
-            self.fs_mut().free_reg = left_reg + 1;
-            left = ExprDesc::Register(left_reg);
+            self.fs_mut().free_reg = base + 1;
+            left = ExprDesc::Register(base);
         }
 
         // Handle comparison operators
@@ -2104,17 +2110,48 @@ impl<'a> Compiler<'a> {
                             }
                         }
 
-                        // Continue with binary operations if any
-                        let primary_reg = self.expr_to_register(expr)?;
-                        let val = self.parse_subexpr_with_primary(primary_reg, 0)?;
-                        let val_reg = self.expr_to_register(val)?;
-                        array_count += 1;
+                        // Check if expr is a Call - handle multi-return for last element
+                        if let ExprDesc::Call(call_base, _nresults, call_pc) = expr {
+                            // Check if this is the last element (no comma/semicolon before })
+                            let is_last = !self.lexer.check(&TokenKind::Comma)? &&
+                                         !self.lexer.check(&TokenKind::Semicolon)?;
+                            let line = self.current_line();
+                            if is_last {
+                                // Patch the call to return all values (C=0 for variable results)
+                                let code = &mut self.fs_mut().proto.code;
+                                let instr = code[call_pc];
+                                let a = instr.a();
+                                let b = instr.b();
+                                code[call_pc] = Instruction::abc(instr.opcode(), a, b, 0);
 
-                        let line = self.current_line();
-                        self.fs_mut().emit(
-                            Instruction::abc(Opcode::TSETB, reg, val_reg, array_count as u8),
-                            line,
-                        );
+                                // Use TSETM to set multiple values from call_base to top
+                                // D = array_count + 1 (next index, 1-based)
+                                self.fs_mut().emit(
+                                    Instruction::ad(Opcode::TSETM, reg, (array_count + 1) as u16),
+                                    line,
+                                );
+                                // Don't increment array_count as we don't know how many were added
+                            } else {
+                                // Not last element, just take first return value
+                                array_count += 1;
+                                self.fs_mut().emit(
+                                    Instruction::abc(Opcode::TSETB, reg, call_base, array_count as u8),
+                                    line,
+                                );
+                            }
+                        } else {
+                            // Continue with binary operations if any
+                            let primary_reg = self.expr_to_register(expr)?;
+                            let val = self.parse_subexpr_with_primary(primary_reg, 0)?;
+                            let val_reg = self.expr_to_register(val)?;
+                            array_count += 1;
+
+                            let line = self.current_line();
+                            self.fs_mut().emit(
+                                Instruction::abc(Opcode::TSETB, reg, val_reg, array_count as u8),
+                                line,
+                            );
+                        }
                     }
                 }
                 _ => {
@@ -2122,7 +2159,7 @@ impl<'a> Compiler<'a> {
                     let val = self.parse_expression()?;
                     let line = self.current_line();
 
-                    // Check if this is vararg (...) - handle specially for multi-value expansion
+                    // Check if this is vararg (...) or a call - handle specially for multi-value expansion
                     match val {
                         ExprDesc::Vararg => {
                             // Check if this is the last element (no comma/semicolon before })
@@ -2151,6 +2188,34 @@ impl<'a> Compiler<'a> {
                                 array_count += 1;
                                 self.fs_mut().emit(
                                     Instruction::abc(Opcode::TSETB, reg, val_reg, array_count as u8),
+                                    line,
+                                );
+                            }
+                        }
+                        ExprDesc::Call(call_base, _nresults, call_pc) => {
+                            // Check if this is the last element (no comma/semicolon before })
+                            let is_last = !self.lexer.check(&TokenKind::Comma)? &&
+                                         !self.lexer.check(&TokenKind::Semicolon)?;
+                            if is_last {
+                                // Patch the call to return all values (C=0 for variable results)
+                                let code = &mut self.fs_mut().proto.code;
+                                let instr = code[call_pc];
+                                let a = instr.a();
+                                let b = instr.b();
+                                code[call_pc] = Instruction::abc(instr.opcode(), a, b, 0);
+
+                                // Use TSETM to set multiple values from call_base to top
+                                // D = array_count + 1 (next index, 1-based)
+                                self.fs_mut().emit(
+                                    Instruction::ad(Opcode::TSETM, reg, (array_count + 1) as u16),
+                                    line,
+                                );
+                                // Don't increment array_count as we don't know how many were added
+                            } else {
+                                // Not last element, just take first return value
+                                array_count += 1;
+                                self.fs_mut().emit(
+                                    Instruction::abc(Opcode::TSETB, reg, call_base, array_count as u8),
                                     line,
                                 );
                             }

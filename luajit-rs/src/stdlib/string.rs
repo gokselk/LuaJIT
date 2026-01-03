@@ -4,15 +4,29 @@ use crate::value::{Value, LuaError, LuaResult};
 use crate::vm::State;
 
 pub fn register_string(state: &mut State) {
-    state.register_function("string.byte", string_byte);
-    state.register_function("string.char", string_char);
-    state.register_function("string.len", string_len);
-    state.register_function("string.lower", string_lower);
-    state.register_function("string.upper", string_upper);
-    state.register_function("string.rep", string_rep);
-    state.register_function("string.reverse", string_reverse);
-    state.register_function("string.sub", string_sub);
-    state.register_function("string.format", string_format);
+    // Create string table
+    let string_table = state.create_table(0, 16);
+
+    // Helper to add a function to the string table
+    let add_func = |state: &mut State, tbl: crate::value::GcRef<crate::value::Table>, name: &str, func: crate::value::NativeFn| {
+        let native = crate::value::NativeFunction::new(func);
+        let func_ref = state.gc.alloc(crate::value::Function::Native(native));
+        let key = state.intern_string(name);
+        unsafe { (*tbl.as_ptr()).set(key, Value::function(func_ref)); }
+    };
+
+    // Add functions to string table
+    add_func(state, string_table, "byte", string_byte);
+    add_func(state, string_table, "char", string_char);
+    add_func(state, string_table, "len", string_len);
+    add_func(state, string_table, "lower", string_lower);
+    add_func(state, string_table, "upper", string_upper);
+    add_func(state, string_table, "rep", string_rep);
+    add_func(state, string_table, "reverse", string_reverse);
+    add_func(state, string_table, "sub", string_sub);
+    add_func(state, string_table, "format", string_format);
+
+    state.set_global("string", Value::table(string_table));
 }
 
 fn string_byte(state: &mut State) -> LuaResult<usize> {
