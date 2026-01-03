@@ -136,6 +136,13 @@ impl<'a> Interpreter<'a> {
                     self.state.stack.set(target_start + i, val);
                 }
 
+                // Fill remaining expected slots with nil (important for ITERC when next() returns 0)
+                if nresults > 0 {
+                    for i in num_returns..(nresults as usize) {
+                        self.state.stack.set(target_start + i, Value::nil());
+                    }
+                }
+
                 // Adjust top
                 let new_top = if nresults < 0 {
                     target_start + num_returns

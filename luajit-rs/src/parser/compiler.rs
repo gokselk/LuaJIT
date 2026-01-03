@@ -520,13 +520,29 @@ impl<'a> Compiler<'a> {
 
         // Parse iterator expressions (generator, state, control)
         let mut num_exprs = 0;
+        let mut last_expr_is_call = false;
         loop {
             let expr = self.parse_expression()?;
+            last_expr_is_call = matches!(expr, ExprDesc::Call(_, _));
             self.expr_to_next_reg(expr)?;
             num_exprs += 1;
             if !self.lexer.match_token(&TokenKind::Comma)? {
                 break;
             }
+        }
+
+        // If there's only 1 expression and it's a call, patch it to return 3 values
+        // (e.g., pairs(t) returns next, t, nil)
+        if num_exprs == 1 && last_expr_is_call {
+            // Patch the CALL instruction to request 3 results instead of 1
+            let call_pc = self.fs().current_pc() - 1;
+            let mut call_instr = self.fs().proto.code[call_pc];
+            // C field: 2 = 1 result, 4 = 3 results
+            call_instr.set_c(4);
+            self.fs_mut().proto.code[call_pc] = call_instr;
+            // Reserve the additional 2 slots for the extra return values
+            self.fs_mut().free_reg = base + 3;
+            num_exprs = 3;
         }
 
         // Adjust to 3 values
