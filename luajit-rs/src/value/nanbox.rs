@@ -428,12 +428,12 @@ impl Value {
 
     // ==================== Arithmetic Operations ====================
 
-    /// Add two values
+    /// Add two values (with string coercion)
     pub fn add(&self, other: &Value) -> LuaResult<Value> {
-        match (self.as_number(), other.as_number()) {
+        match (self.coerce_to_number(), other.coerce_to_number()) {
             (Some(a), Some(b)) => Ok(Value::number(a + b)),
             _ => {
-                let ty = if self.as_number().is_none() {
+                let ty = if self.coerce_to_number().is_none() {
                     self.lua_type()
                 } else {
                     other.lua_type()
@@ -443,12 +443,12 @@ impl Value {
         }
     }
 
-    /// Subtract two values
+    /// Subtract two values (with string coercion)
     pub fn sub(&self, other: &Value) -> LuaResult<Value> {
-        match (self.as_number(), other.as_number()) {
+        match (self.coerce_to_number(), other.coerce_to_number()) {
             (Some(a), Some(b)) => Ok(Value::number(a - b)),
             _ => {
-                let ty = if self.as_number().is_none() {
+                let ty = if self.coerce_to_number().is_none() {
                     self.lua_type()
                 } else {
                     other.lua_type()
@@ -458,12 +458,12 @@ impl Value {
         }
     }
 
-    /// Multiply two values
+    /// Multiply two values (with string coercion)
     pub fn mul(&self, other: &Value) -> LuaResult<Value> {
-        match (self.as_number(), other.as_number()) {
+        match (self.coerce_to_number(), other.coerce_to_number()) {
             (Some(a), Some(b)) => Ok(Value::number(a * b)),
             _ => {
-                let ty = if self.as_number().is_none() {
+                let ty = if self.coerce_to_number().is_none() {
                     self.lua_type()
                 } else {
                     other.lua_type()
@@ -473,12 +473,12 @@ impl Value {
         }
     }
 
-    /// Divide two values
+    /// Divide two values (with string coercion)
     pub fn div(&self, other: &Value) -> LuaResult<Value> {
-        match (self.as_number(), other.as_number()) {
+        match (self.coerce_to_number(), other.coerce_to_number()) {
             (Some(a), Some(b)) => Ok(Value::number(a / b)),
             _ => {
-                let ty = if self.as_number().is_none() {
+                let ty = if self.coerce_to_number().is_none() {
                     self.lua_type()
                 } else {
                     other.lua_type()
@@ -488,16 +488,16 @@ impl Value {
         }
     }
 
-    /// Modulo operation
+    /// Modulo operation (with string coercion)
     pub fn modulo(&self, other: &Value) -> LuaResult<Value> {
-        match (self.as_number(), other.as_number()) {
+        match (self.coerce_to_number(), other.coerce_to_number()) {
             (Some(a), Some(b)) => {
                 // Lua's modulo: a - floor(a/b)*b
                 let result = a - (a / b).floor() * b;
                 Ok(Value::number(result))
             }
             _ => {
-                let ty = if self.as_number().is_none() {
+                let ty = if self.coerce_to_number().is_none() {
                     self.lua_type()
                 } else {
                     other.lua_type()
@@ -507,12 +507,12 @@ impl Value {
         }
     }
 
-    /// Power operation
+    /// Power operation (with string coercion)
     pub fn pow(&self, other: &Value) -> LuaResult<Value> {
-        match (self.as_number(), other.as_number()) {
+        match (self.coerce_to_number(), other.coerce_to_number()) {
             (Some(a), Some(b)) => Ok(Value::number(a.powf(b))),
             _ => {
-                let ty = if self.as_number().is_none() {
+                let ty = if self.coerce_to_number().is_none() {
                     self.lua_type()
                 } else {
                     other.lua_type()
@@ -522,20 +522,20 @@ impl Value {
         }
     }
 
-    /// Unary minus
+    /// Unary minus (with string coercion)
     pub fn unm(&self) -> LuaResult<Value> {
-        match self.as_number() {
+        match self.coerce_to_number() {
             Some(n) => Ok(Value::number(-n)),
             None => Err(LuaError::ArithmeticError(self.lua_type())),
         }
     }
 
-    /// Integer division (Lua 5.3+)
+    /// Integer division (Lua 5.3+) (with string coercion)
     pub fn idiv(&self, other: &Value) -> LuaResult<Value> {
-        match (self.as_number(), other.as_number()) {
+        match (self.coerce_to_number(), other.coerce_to_number()) {
             (Some(a), Some(b)) => Ok(Value::number((a / b).floor())),
             _ => {
-                let ty = if self.as_number().is_none() {
+                let ty = if self.coerce_to_number().is_none() {
                     self.lua_type()
                 } else {
                     other.lua_type()

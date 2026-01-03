@@ -23,15 +23,30 @@ impl<'a> Interpreter<'a> {
         match func.as_function() {
             Some(func_ref) => unsafe {
                 match &*func_ref.as_ptr() {
-                    Function::Lua(closure) => {
+                    Function::Lua(_closure) => {
                         self.call_lua(func_idx, nargs, nresults)
                     }
-                    Function::Native(native) => {
+                    Function::Native(_native) => {
                         self.call_native(func_idx, nargs, nresults)
                     }
                 }
             },
-            None => Err(LuaError::CallError(func.lua_type())),
+            None => {
+                // Try __call metamethod
+                if let Some(mm) = self.get_metamethod(&func, "__call") {
+                    // Shift arguments right to make room for the object as first arg
+                    // Stack layout before: [obj, arg1, arg2, ...]
+                    // Stack layout after: [mm, obj, arg1, arg2, ...]
+                    for i in (0..=nargs).rev() {
+                        let val = self.state.stack.get(func_idx + i);
+                        self.state.stack.set(func_idx + i + 1, val);
+                    }
+                    self.state.stack.set(func_idx, mm);
+                    // Now call with nargs+1 arguments (the original object + original args)
+                    return self.call(func_idx, nargs + 1, nresults);
+                }
+                Err(LuaError::CallError(func.lua_type()))
+            },
         }
     }
 
@@ -189,6 +204,109 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Look up a metamethod in a value's metatable
+    fn get_metamethod(&mut self, val: &Value, method: &str) -> Option<Value> {
+        if let Some(t) = val.as_table() {
+            let table = unsafe { &*t.as_ptr() };
+            if let Some(mt) = table.get_metatable() {
+                let mt = unsafe { &*mt.as_ptr() };
+                let key = self.state.intern_string(method);
+                let result = mt.get(&key);
+                if !result.is_nil() {
+                    return Some(result);
+                }
+            }
+        }
+        None
+    }
+
+    /// Call a binary metamethod and return the result
+    fn call_binary_metamethod(&mut self, mm: Value, a: Value, b: Value, result_slot: usize) -> LuaResult<()> {
+        // Set up the call: func, arg1, arg2
+        let call_base = self.state.stack.top();
+        self.state.stack.set(call_base, mm);
+        self.state.stack.set(call_base + 1, a);
+        self.state.stack.set(call_base + 2, b);
+        self.state.stack.set_top(call_base + 3);
+
+        // Call the metamethod
+        self.call(call_base, 2, 1)?;
+
+        // Get the result and move it to the target slot
+        let result = self.state.stack.get(call_base);
+        self.state.stack.set(result_slot, result);
+
+        Ok(())
+    }
+
+    /// Call a unary metamethod and return the result
+    fn call_unary_metamethod(&mut self, mm: Value, a: Value, result_slot: usize) -> LuaResult<()> {
+        // Set up the call: func, arg, arg (Lua passes operand twice for consistency with binary ops)
+        let call_base = self.state.stack.top();
+        self.state.stack.set(call_base, mm);
+        self.state.stack.set(call_base + 1, a.clone());
+        self.state.stack.set(call_base + 2, a);
+        self.state.stack.set_top(call_base + 3);
+
+        // Call the metamethod
+        self.call(call_base, 2, 1)?;
+
+        // Get the result and move it to the target slot
+        let result = self.state.stack.get(call_base);
+        self.state.stack.set(result_slot, result);
+
+        Ok(())
+    }
+
+    /// Perform binary arithmetic with metamethod fallback
+    fn arith_binary(&mut self, vb: Value, vc: Value, base_a: usize, mm_name: &str,
+                    op: fn(&Value, &Value) -> LuaResult<Value>) -> LuaResult<()> {
+        // Try the normal operation first
+        match op(&vb, &vc) {
+            Ok(result) => {
+                self.state.stack.set(base_a, result);
+                Ok(())
+            }
+            Err(LuaError::ArithmeticError(_)) => {
+                // Try metamethod from first operand, then second
+                if let Some(mm) = self.get_metamethod(&vb, mm_name) {
+                    return self.call_binary_metamethod(mm, vb, vc, base_a);
+                }
+                if let Some(mm) = self.get_metamethod(&vc, mm_name) {
+                    return self.call_binary_metamethod(mm, vb, vc, base_a);
+                }
+                // No metamethod found, return the original error
+                let ty = if vb.coerce_to_number().is_none() {
+                    vb.lua_type()
+                } else {
+                    vc.lua_type()
+                };
+                Err(LuaError::ArithmeticError(ty))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Perform unary arithmetic with metamethod fallback
+    fn arith_unary(&mut self, v: Value, base_a: usize, mm_name: &str,
+                   op: fn(&Value) -> LuaResult<Value>) -> LuaResult<()> {
+        // Try the normal operation first
+        match op(&v) {
+            Ok(result) => {
+                self.state.stack.set(base_a, result);
+                Ok(())
+            }
+            Err(LuaError::ArithmeticError(_)) => {
+                // Try metamethod
+                if let Some(mm) = self.get_metamethod(&v, mm_name) {
+                    return self.call_unary_metamethod(mm, v.clone(), base_a);
+                }
+                Err(LuaError::ArithmeticError(v.lua_type()))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Main execution loop
     fn execute(&mut self) -> LuaResult<()> {
         loop {
@@ -259,14 +377,13 @@ impl<'a> Interpreter<'a> {
                     self.state.stack.set(base + a, string_val);
                 }
 
-                // Arithmetic operations
+                // Arithmetic operations (with metamethod support)
                 Opcode::ADDVV => {
                     let b = instr.b() as usize;
                     let c = instr.c() as usize;
                     let vb = self.state.stack.get(base + b);
                     let vc = self.state.stack.get(base + c);
-                    let result = vb.add(&vc)?;
-                    self.state.stack.set(base + a, result);
+                    self.arith_binary(vb, vc, base + a, "__add", Value::add)?;
                 }
 
                 Opcode::SUBVV => {
@@ -274,8 +391,7 @@ impl<'a> Interpreter<'a> {
                     let c = instr.c() as usize;
                     let vb = self.state.stack.get(base + b);
                     let vc = self.state.stack.get(base + c);
-                    let result = vb.sub(&vc)?;
-                    self.state.stack.set(base + a, result);
+                    self.arith_binary(vb, vc, base + a, "__sub", Value::sub)?;
                 }
 
                 Opcode::MULVV => {
@@ -283,8 +399,7 @@ impl<'a> Interpreter<'a> {
                     let c = instr.c() as usize;
                     let vb = self.state.stack.get(base + b);
                     let vc = self.state.stack.get(base + c);
-                    let result = vb.mul(&vc)?;
-                    self.state.stack.set(base + a, result);
+                    self.arith_binary(vb, vc, base + a, "__mul", Value::mul)?;
                 }
 
                 Opcode::DIVVV => {
@@ -292,8 +407,7 @@ impl<'a> Interpreter<'a> {
                     let c = instr.c() as usize;
                     let vb = self.state.stack.get(base + b);
                     let vc = self.state.stack.get(base + c);
-                    let result = vb.div(&vc)?;
-                    self.state.stack.set(base + a, result);
+                    self.arith_binary(vb, vc, base + a, "__div", Value::div)?;
                 }
 
                 Opcode::MODVV => {
@@ -301,8 +415,7 @@ impl<'a> Interpreter<'a> {
                     let c = instr.c() as usize;
                     let vb = self.state.stack.get(base + b);
                     let vc = self.state.stack.get(base + c);
-                    let result = vb.modulo(&vc)?;
-                    self.state.stack.set(base + a, result);
+                    self.arith_binary(vb, vc, base + a, "__mod", Value::modulo)?;
                 }
 
                 Opcode::POW => {
@@ -310,15 +423,13 @@ impl<'a> Interpreter<'a> {
                     let c = instr.c() as usize;
                     let vb = self.state.stack.get(base + b);
                     let vc = self.state.stack.get(base + c);
-                    let result = vb.pow(&vc)?;
-                    self.state.stack.set(base + a, result);
+                    self.arith_binary(vb, vc, base + a, "__pow", Value::pow)?;
                 }
 
                 Opcode::UNM => {
                     let d = instr.d() as usize;
                     let vd = self.state.stack.get(base + d);
-                    let result = vd.unm()?;
-                    self.state.stack.set(base + a, result);
+                    self.arith_unary(vd, base + a, "__unm", Value::unm)?;
                 }
 
                 Opcode::NOT => {
@@ -793,23 +904,56 @@ impl<'a> Interpreter<'a> {
                     let b = instr.b() as usize;
                     let c = instr.c() as usize;
 
-                    let mut result = String::new();
-                    for i in b..=c {
-                        let val = self.state.stack.get(base + i);
+                    // Helper to convert a value to string if possible
+                    fn to_concat_string(val: &Value, state: &State) -> Option<String> {
                         if let Some(n) = val.as_number() {
-                            result.push_str(&format!("{}", n));
+                            if let Some(i) = val.as_integer() {
+                                Some(format!("{}", i))
+                            } else {
+                                Some(format!("{}", n))
+                            }
                         } else if let Some(s) = val.as_string() {
                             let s = unsafe { &*s.as_ptr() };
-                            if let Some(str_val) = s.as_str() {
-                                result.push_str(str_val);
-                            }
+                            s.as_str().map(|s| s.to_string())
                         } else {
-                            return Err(LuaError::ConcatError(val.lua_type()));
+                            None
                         }
                     }
 
-                    let str_val = self.state.intern_string(&result);
-                    self.state.stack.set(base + a, str_val);
+                    // Start with the rightmost value and work left
+                    // This handles metamethods correctly: a..b..c = a..(b..c)
+                    let mut right = self.state.stack.get(base + c);
+                    for i in (b..c).rev() {
+                        let left = self.state.stack.get(base + i);
+
+                        // Try direct string conversion first
+                        match (to_concat_string(&left, &self.state), to_concat_string(&right, &self.state)) {
+                            (Some(l), Some(r)) => {
+                                let result = format!("{}{}", l, r);
+                                right = self.state.intern_string(&result);
+                            }
+                            _ => {
+                                // Try __concat metamethod from left, then right
+                                if let Some(mm) = self.get_metamethod(&left, "__concat") {
+                                    self.call_binary_metamethod(mm, left, right, base + c)?;
+                                    right = self.state.stack.get(base + c);
+                                } else if let Some(mm) = self.get_metamethod(&right, "__concat") {
+                                    self.call_binary_metamethod(mm, left, right, base + c)?;
+                                    right = self.state.stack.get(base + c);
+                                } else {
+                                    // No metamethod - error
+                                    return Err(LuaError::ConcatError(
+                                        if to_concat_string(&left, &self.state).is_none() {
+                                            left.lua_type()
+                                        } else {
+                                            right.lua_type()
+                                        }
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    self.state.stack.set(base + a, right);
                 }
 
                 // Vararg
