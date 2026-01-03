@@ -1597,30 +1597,42 @@ impl<'a> Compiler<'a> {
                         let arg = self.parse_expression()?;
 
                         // Check if this is a call or vararg expression (might be last arg)
-                        match &arg {
-                            ExprDesc::Call(_, _, pc) => {
+                        let call_base = match &arg {
+                            ExprDesc::Call(base, _, pc) => {
                                 last_call_pc = Some(*pc);
                                 last_is_vararg = false;
                                 last_vararg_pc = None;
+                                Some(*base)
                             }
                             ExprDesc::Vararg => {
                                 last_is_vararg = true;
                                 last_call_pc = None;
                                 // We'll get the VARG pc after expr_to_reg emits it
                                 last_vararg_pc = Some(self.fs().current_pc());
+                                None
                             }
                             _ => {
                                 last_call_pc = None;
                                 last_is_vararg = false;
                                 last_vararg_pc = None;
+                                None
                             }
-                        }
+                        };
 
                         self.expr_to_reg(arg, target)?;
 
                         // If last was vararg, get the actual pc of VARG instruction
                         if last_is_vararg {
                             last_vararg_pc = Some(self.fs().current_pc() - 1);
+                        }
+
+                        // Track if a MOV was emitted for the last call (call_base != target)
+                        // If MOV was needed, the call doesn't land at target, so we can't use
+                        // variable result passing (would have gaps in args)
+                        let call_at_target = call_base.map(|b| b == target).unwrap_or(true);
+                        if !call_at_target {
+                            // Clear last_call_pc so we don't patch this call to C=0
+                            last_call_pc = None;
                         }
 
                         // Ensure next arg goes to next slot
