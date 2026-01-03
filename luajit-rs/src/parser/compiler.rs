@@ -879,23 +879,33 @@ impl<'a> Compiler<'a> {
             return Ok(());
         }
 
-        // Parse return values - track where each value actually ends up
-        let mut first_reg = None;
+        // Parse return values into consecutive registers starting at base
+        let base = self.fs().free_reg;
         let mut count = 0u8;
+        let mut value_regs = Vec::new();
 
+        // First pass: parse all expressions and track where they end up
         loop {
             let expr = self.parse_expression()?;
             let reg = self.expr_to_next_reg(expr)?;
-            if first_reg.is_none() {
-                first_reg = Some(reg);
-            }
+            value_regs.push(reg);
             count += 1;
             if !self.lexer.match_token(&TokenKind::Comma)? {
                 break;
             }
         }
 
-        let base = first_reg.unwrap_or(0);
+        // Second pass: move values to consecutive slots if needed
+        for (i, &reg) in value_regs.iter().enumerate() {
+            let target = base + i as u8;
+            if reg != target {
+                self.fs_mut().emit(
+                    Instruction::ad(Opcode::MOV, target, reg as u16),
+                    line,
+                );
+            }
+        }
+
         if count == 1 {
             self.fs_mut().emit(Instruction::ad(Opcode::RET1, base, 2), line);
         } else {

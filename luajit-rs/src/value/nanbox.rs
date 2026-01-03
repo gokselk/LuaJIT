@@ -565,18 +565,15 @@ impl Value {
 
     /// Equality comparison (raw equality, no metamethods)
     pub fn raw_eq(&self, other: &Value) -> bool {
-        if self.bits == other.bits {
-            return true;
-        }
-
-        // Handle NaN: NaN != NaN
+        // For numbers, use f64 comparison which properly handles NaN (NaN != NaN)
         if self.is_number() && other.is_number() {
             let a = f64::from_bits(self.bits);
             let b = f64::from_bits(other.bits);
             return a == b;
         }
 
-        false
+        // For non-numbers, bit equality is sufficient
+        self.bits == other.bits
     }
 
     /// Get the raw bits (for debugging/serialization)
