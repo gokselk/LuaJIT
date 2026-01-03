@@ -48,7 +48,7 @@ impl<'a> Interpreter<'a> {
         };
 
         let proto = unsafe { &*(*closure.as_ptr()).proto.as_ptr() };
-        let base = func_idx + 1;
+        let arg_base = func_idx + 1; // Where args start
 
         // Save caller's stack state
         let saved_base = self.state.stack.base();
@@ -58,24 +58,38 @@ impl<'a> Interpreter<'a> {
         let num_params = proto.num_params as usize;
         let current_args = nargs;
 
-        if current_args < num_params {
-            // Fill missing args with nil
-            for i in current_args..num_params {
-                self.state.stack.set(base + i, Value::nil());
-            }
-        }
+        // Handle varargs - varargs are stored BEFORE the frame's base
+        // so they don't conflict with local registers
+        let (base, vararg_base, vararg_count) = if proto.is_vararg {
+            let vcount = if current_args > num_params { current_args - num_params } else { 0 };
+            // Varargs start after fixed params: arg_base + num_params
+            let vbase = arg_base + num_params;
+            // Frame base starts after varargs
+            let frame_base = arg_base + current_args.max(num_params);
 
-        // Handle varargs
-        let vararg_base = if proto.is_vararg && current_args > num_params {
-            let vbase = base + num_params;
-            Some(vbase)
+            // Copy fixed params to frame base (R0, R1, ...)
+            for i in 0..num_params.min(current_args) {
+                let val = self.state.stack.get(arg_base + i);
+                self.state.stack.set(frame_base + i, val);
+            }
+            // Fill missing params with nil
+            for i in current_args..num_params {
+                self.state.stack.set(frame_base + i, Value::nil());
+            }
+
+            (frame_base, Some(vbase), vcount)
         } else {
-            None
+            // Non-vararg: base is where args start, fill missing with nil
+            for i in current_args..num_params {
+                self.state.stack.set(arg_base + i, Value::nil());
+            }
+            (arg_base, None, 0)
         };
 
         // Create call frame
         let mut frame = CallFrame::new_lua(closure, base, nresults);
         frame.vararg_base = vararg_base;
+        frame.vararg_count = vararg_count;
         frame.top = base + proto.max_stack_size as usize;
 
         // Set up stack
@@ -577,7 +591,8 @@ impl<'a> Interpreter<'a> {
                     let c = instr.c() as i32;   // nresults + 1
 
                     let nargs = if b == 0 {
-                        self.state.stack.top() - base - a - 1
+                        // Variable args from previous call: calculate based on stack top
+                        self.state.stack.top().saturating_sub(base + a + 1)
                     } else {
                         b - 1
                     };
@@ -755,9 +770,9 @@ impl<'a> Interpreter<'a> {
                 Opcode::VARG => {
                     let b = instr.b() as usize; // Number of varargs wanted + 1
                     let frame = self.state.call_stack.current().unwrap();
+                    let num_varargs = frame.vararg_count;
 
                     if let Some(vbase) = frame.vararg_base {
-                        let num_varargs = base - vbase;
                         let wanted = if b == 0 {
                             num_varargs
                         } else {

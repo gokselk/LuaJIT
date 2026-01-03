@@ -12,6 +12,7 @@ use std::path::PathBuf;
 #[command(author = "LuaJIT-RS Contributors")]
 #[command(version = VERSION)]
 #[command(about = "A Lua interpreter with Cranelift JIT compilation", long_about = None)]
+#[command(disable_version_flag = true)]
 struct Cli {
     /// Lua script file to execute
     #[arg(value_name = "SCRIPT")]
@@ -26,7 +27,7 @@ struct Cli {
     interactive: bool,
 
     /// Print version information
-    #[arg(short = 'V', long = "show-version")]
+    #[arg(short = 'v', short_alias = 'V', long = "version")]
     show_version: bool,
 
     /// Disable JIT compilation
@@ -247,22 +248,48 @@ fn dump_bytecode(state: &mut luajit_rs::vm::State, input: &PathBuf) {
     let chunk_name = format!("@{}", input.display());
     match luajit_rs::parse(&code, &chunk_name) {
         Ok(proto) => {
-            println!("-- Bytecode dump: {}", input.display());
-            println!("-- {} instructions, {} constants", proto.code.len(), proto.constants.len());
-            println!();
-
-            for (i, instr) in proto.code.iter().enumerate() {
-                let line = proto.lineinfo.get(i).copied().unwrap_or(0);
-                println!("{:4}  [{:3}]  {}", i, line, instr);
-            }
-
-            if !proto.constants.is_empty() {
+            fn dump_proto(proto: &luajit_rs::value::Proto, name: &str, indent: usize) {
+                let pad = " ".repeat(indent);
+                println!("{}-- Proto: {}", pad, name);
+                println!("{}-- is_vararg: {}, num_params: {}", pad, proto.is_vararg, proto.num_params);
+                println!("{}-- {} instructions, {} constants, {} nested protos", pad, proto.code.len(), proto.constants.len(), proto.protos.len());
                 println!();
-                println!("-- Constants:");
-                for (i, k) in proto.constants.iter().enumerate() {
-                    println!("  K{}: {:?}", i, k);
+
+                for (i, instr) in proto.code.iter().enumerate() {
+                    let line = proto.lineinfo.get(i).copied().unwrap_or(0);
+                    println!("{}{:4}  [{:3}]  {}", pad, i, line, instr);
+                }
+
+                if !proto.constants.is_empty() {
+                    println!();
+                    println!("{}-- Constants:", pad);
+                    for (i, k) in proto.constants.iter().enumerate() {
+                        println!("{}  K{}: {:?}", pad, i, k);
+                    }
+                }
+
+                if !proto.string_constants.is_empty() {
+                    println!();
+                    println!("{}-- String Constants:", pad);
+                    for (i, s) in proto.string_constants.iter().enumerate() {
+                        println!("{}  S{}: {:?}", pad, i, s);
+                    }
+                }
+
+                // Show child protos (compile-time)
+                for (i, child) in proto.child_protos.iter().enumerate() {
+                    println!();
+                    dump_proto(child.as_ref(), &format!("nested[{}]", i), indent + 2);
+                }
+                // Show GC-allocated protos (runtime)
+                for (i, child) in proto.protos.iter().enumerate() {
+                    println!();
+                    let child_proto = unsafe { &*child.as_ptr() };
+                    dump_proto(child_proto, &format!("gc_proto[{}]", i), indent + 2);
                 }
             }
+
+            dump_proto(&proto, &input.display().to_string(), 0);
         }
         Err(e) => {
             eprintln!("Parse error: {}", e);

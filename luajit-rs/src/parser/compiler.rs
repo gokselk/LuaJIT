@@ -1582,6 +1582,10 @@ impl<'a> Compiler<'a> {
         // Set free_reg to base + 1 so arguments go immediately after function
         self.fs_mut().free_reg = base + 1;
 
+        // Track if last arg is a call or vararg (for variable args)
+        let mut last_call_pc: Option<usize> = None;
+        let mut last_is_vararg = false;
+        let mut last_vararg_pc: Option<usize> = None;
         let num_args = match &self.lexer.peek()?.kind {
             TokenKind::LParen => {
                 self.lexer.next()?;
@@ -1591,7 +1595,34 @@ impl<'a> Compiler<'a> {
                         // Target register for this argument
                         let target = self.fs().free_reg;
                         let arg = self.parse_expression()?;
+
+                        // Check if this is a call or vararg expression (might be last arg)
+                        match &arg {
+                            ExprDesc::Call(_, _, pc) => {
+                                last_call_pc = Some(*pc);
+                                last_is_vararg = false;
+                                last_vararg_pc = None;
+                            }
+                            ExprDesc::Vararg => {
+                                last_is_vararg = true;
+                                last_call_pc = None;
+                                // We'll get the VARG pc after expr_to_reg emits it
+                                last_vararg_pc = Some(self.fs().current_pc());
+                            }
+                            _ => {
+                                last_call_pc = None;
+                                last_is_vararg = false;
+                                last_vararg_pc = None;
+                            }
+                        }
+
                         self.expr_to_reg(arg, target)?;
+
+                        // If last was vararg, get the actual pc of VARG instruction
+                        if last_is_vararg {
+                            last_vararg_pc = Some(self.fs().current_pc() - 1);
+                        }
+
                         // Ensure next arg goes to next slot
                         self.fs_mut().free_reg = target + 1;
                         count += 1;
@@ -1620,10 +1651,29 @@ impl<'a> Compiler<'a> {
             _ => return Err(LuaError::SyntaxError("expected function arguments".to_string())),
         };
 
+        // If last arg was a call or vararg, patch it and use B=0 for variable args
+        let b_field = if let Some(call_pc) = last_call_pc {
+            // Patch inner call to return variable results
+            let mut inner_call = self.fs().proto.code[call_pc];
+            inner_call.set_c(0); // C=0 means return all results
+            self.fs_mut().proto.code[call_pc] = inner_call;
+            0u8 // B=0 means variable args from previous call
+        } else if last_is_vararg {
+            // Patch VARG instruction to return all varargs (B=0)
+            if let Some(vararg_pc) = last_vararg_pc {
+                let mut varg_instr = self.fs().proto.code[vararg_pc];
+                varg_instr.set_b(0); // B=0 means return all varargs
+                self.fs_mut().proto.code[vararg_pc] = varg_instr;
+            }
+            0u8 // B=0 means variable args from vararg
+        } else {
+            num_args + 1 // Normal: B = fixed args + 1
+        };
+
         // Emit CALL
         let call_pc = self.fs().current_pc();
         self.fs_mut().emit(
-            Instruction::abc(Opcode::CALL, base, num_args + 1, 2), // 2 = 1 result + 1
+            Instruction::abc(Opcode::CALL, base, b_field, 2), // 2 = 1 result + 1
             line,
         );
         self.fs_mut().free_reg = base + 1;
@@ -1648,6 +1698,10 @@ impl<'a> Compiler<'a> {
         self.fs_mut().free_reg = base + 2;
 
         // Parse arguments (starting at base + 2)
+        // Track if last arg is a call or vararg (for variable args)
+        let mut last_call_pc: Option<usize> = None;
+        let mut last_is_vararg = false;
+        let mut last_vararg_pc: Option<usize> = None;
         let num_args = match &self.lexer.peek()?.kind {
             TokenKind::LParen => {
                 self.lexer.next()?;
@@ -1656,7 +1710,33 @@ impl<'a> Compiler<'a> {
                     loop {
                         let target = self.fs().free_reg;
                         let arg = self.parse_expression()?;
+
+                        // Check if this is a call or vararg expression (might be last arg)
+                        match &arg {
+                            ExprDesc::Call(_, _, pc) => {
+                                last_call_pc = Some(*pc);
+                                last_is_vararg = false;
+                                last_vararg_pc = None;
+                            }
+                            ExprDesc::Vararg => {
+                                last_is_vararg = true;
+                                last_call_pc = None;
+                                last_vararg_pc = Some(self.fs().current_pc());
+                            }
+                            _ => {
+                                last_call_pc = None;
+                                last_is_vararg = false;
+                                last_vararg_pc = None;
+                            }
+                        }
+
                         self.expr_to_reg(arg, target)?;
+
+                        // If last was vararg, get the actual pc of VARG instruction
+                        if last_is_vararg {
+                            last_vararg_pc = Some(self.fs().current_pc() - 1);
+                        }
+
                         self.fs_mut().free_reg = target + 1;
                         count += 1;
                         if !self.lexer.match_token(&TokenKind::Comma)? {
@@ -1683,10 +1763,29 @@ impl<'a> Compiler<'a> {
             _ => return Err(LuaError::SyntaxError("expected method arguments".to_string())),
         };
 
+        // If last arg was a call or vararg, patch it and use B=0 for variable args
+        let b_field = if let Some(call_pc) = last_call_pc {
+            // Patch inner call to return variable results
+            let mut inner_call = self.fs().proto.code[call_pc];
+            inner_call.set_c(0); // C=0 means return all results
+            self.fs_mut().proto.code[call_pc] = inner_call;
+            0u8 // B=0 means variable args from previous call
+        } else if last_is_vararg {
+            // Patch VARG instruction to return all varargs (B=0)
+            if let Some(vararg_pc) = last_vararg_pc {
+                let mut varg_instr = self.fs().proto.code[vararg_pc];
+                varg_instr.set_b(0); // B=0 means return all varargs
+                self.fs_mut().proto.code[vararg_pc] = varg_instr;
+            }
+            0u8 // B=0 means variable args from vararg
+        } else {
+            num_args + 1 // Normal: B = fixed args + 1
+        };
+
         // Emit CALL
         let call_pc = self.fs().current_pc();
         self.fs_mut().emit(
-            Instruction::abc(Opcode::CALL, base, num_args + 1, 2),
+            Instruction::abc(Opcode::CALL, base, b_field, 2),
             line,
         );
         self.fs_mut().free_reg = base + 1;
@@ -2065,8 +2164,10 @@ impl<'a> Compiler<'a> {
         let line = self.current_line();
         self.fs_mut().emit(Instruction::ad(Opcode::RET0, 0, 1), line);
 
-        // Pop function state
-        let fs = self.functions.pop().unwrap();
+        // Pop function state and copy metadata to proto
+        let mut fs = self.functions.pop().unwrap();
+        fs.proto.num_params = fs.num_params;
+        fs.proto.is_vararg = fs.is_vararg;
         Ok(fs.proto)
     }
 

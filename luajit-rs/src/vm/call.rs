@@ -36,6 +36,8 @@ pub struct CallFrame {
     pub is_native: bool,
     /// Saved vararg base (for vararg functions)
     pub vararg_base: Option<usize>,
+    /// Number of varargs passed
+    pub vararg_count: usize,
 }
 
 impl CallFrame {
@@ -49,6 +51,7 @@ impl CallFrame {
             num_results,
             is_native: false,
             vararg_base: None,
+            vararg_count: 0,
         }
     }
 
@@ -62,6 +65,7 @@ impl CallFrame {
             num_results,
             is_native: true,
             vararg_base: None,
+            vararg_count: 0,
         }
     }
 
