@@ -2120,14 +2120,50 @@ impl<'a> Compiler<'a> {
                 _ => {
                     // Array element
                     let val = self.parse_expression()?;
-                    let val_reg = self.expr_to_register(val)?;
-                    array_count += 1;
-
                     let line = self.current_line();
-                    self.fs_mut().emit(
-                        Instruction::abc(Opcode::TSETB, reg, val_reg, array_count as u8),
-                        line,
-                    );
+
+                    // Check if this is vararg (...) - handle specially for multi-value expansion
+                    match val {
+                        ExprDesc::Vararg => {
+                            // Check if this is the last element (no comma/semicolon before })
+                            let is_last = !self.lexer.check(&TokenKind::Comma)? &&
+                                         !self.lexer.check(&TokenKind::Semicolon)?;
+                            if is_last {
+                                // Use VARG with B=0 (variable count) starting at reg+1
+                                self.fs_mut().emit(
+                                    Instruction::abc(Opcode::VARG, reg + 1, 0, 0),
+                                    line,
+                                );
+                                // Use TSETM to set multiple values from reg+1 to top
+                                // D = array_count + 1 (next index, 1-based)
+                                self.fs_mut().emit(
+                                    Instruction::ad(Opcode::TSETM, reg, (array_count + 1) as u16),
+                                    line,
+                                );
+                                // Don't increment array_count as we don't know how many were added
+                            } else {
+                                // Not last element, just take first vararg value
+                                let val_reg = self.fs_mut().reserve_reg();
+                                self.fs_mut().emit(
+                                    Instruction::abc(Opcode::VARG, val_reg, 2, 0),
+                                    line,
+                                );
+                                array_count += 1;
+                                self.fs_mut().emit(
+                                    Instruction::abc(Opcode::TSETB, reg, val_reg, array_count as u8),
+                                    line,
+                                );
+                            }
+                        }
+                        _ => {
+                            let val_reg = self.expr_to_register(val)?;
+                            array_count += 1;
+                            self.fs_mut().emit(
+                                Instruction::abc(Opcode::TSETB, reg, val_reg, array_count as u8),
+                                line,
+                            );
+                        }
+                    }
                 }
             }
 

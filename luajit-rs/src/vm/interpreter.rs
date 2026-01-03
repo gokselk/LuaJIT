@@ -525,6 +525,24 @@ impl<'a> Interpreter<'a> {
                     }
                 }
 
+                // Multi-value table set (for varargs and calls in table constructors)
+                Opcode::TSETM => {
+                    let d = instr.d() as usize;  // Starting index (1-based)
+                    let table = self.state.stack.get(base + a);
+                    let top = self.state.stack.top();
+
+                    if let Some(t) = table.as_table() {
+                        // Set values from A+1 to top into table starting at index D
+                        let num_values = top.saturating_sub(base + a + 1);
+                        for i in 0..num_values {
+                            let val = self.state.stack.get(base + a + 1 + i);
+                            unsafe { (*t.as_ptr()).set_array(d + i, val) };
+                        }
+                    } else {
+                        return Err(LuaError::IndexError(table.lua_type()));
+                    }
+                }
+
                 // Global operations
                 Opcode::GGET => {
                     let d = instr.d() as usize;
