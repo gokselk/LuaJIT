@@ -5,12 +5,26 @@ use crate::vm::State;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn register_os(state: &mut State) {
-    state.register_function("os.clock", os_clock);
-    state.register_function("os.date", os_date);
-    state.register_function("os.difftime", os_difftime);
-    state.register_function("os.exit", os_exit);
-    state.register_function("os.getenv", os_getenv);
-    state.register_function("os.time", os_time);
+    // Create os table
+    let os_table = state.create_table(0, 8);
+
+    // Helper to add a function to the table
+    let add_func = |state: &mut State, tbl: crate::value::GcRef<crate::value::Table>, name: &str, func: crate::value::NativeFn| {
+        let native = crate::value::NativeFunction::new(func);
+        let func_ref = state.gc.alloc(crate::value::Function::Native(native));
+        let key = state.intern_string(name);
+        unsafe { (*tbl.as_ptr()).set(key, Value::function(func_ref)); }
+    };
+
+    // Add functions to os table
+    add_func(state, os_table, "clock", os_clock);
+    add_func(state, os_table, "date", os_date);
+    add_func(state, os_table, "difftime", os_difftime);
+    add_func(state, os_table, "exit", os_exit);
+    add_func(state, os_table, "getenv", os_getenv);
+    add_func(state, os_table, "time", os_time);
+
+    state.set_global("os", Value::table(os_table));
 }
 
 fn os_clock(state: &mut State) -> LuaResult<usize> {

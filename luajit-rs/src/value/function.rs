@@ -145,21 +145,21 @@ impl Default for Proto {
 pub struct Upvalue {
     /// GC header
     pub gc: GcHeader,
-    /// The value storage
+    /// The value storage (used when closed)
     value: Cell<Value>,
-    /// If open, points to the stack slot; if closed, this is None
-    stack_slot: Cell<Option<*mut Value>>,
+    /// If open, contains the stack index; if closed, this is None
+    stack_index: Cell<Option<usize>>,
     /// Link to next upvalue in the open upvalue list
     pub next: Cell<Option<GcRef<Upvalue>>>,
 }
 
 impl Upvalue {
-    /// Create a new open upvalue pointing to a stack slot
-    pub fn new_open(slot: *mut Value) -> Self {
+    /// Create a new open upvalue pointing to a stack index
+    pub fn new_open(index: usize) -> Self {
         Self {
             gc: GcHeader::new(11), // LuaType::Upvalue
             value: Cell::new(Value::nil()),
-            stack_slot: Cell::new(Some(slot)),
+            stack_index: Cell::new(Some(index)),
             next: Cell::new(None),
         }
     }
@@ -169,20 +169,30 @@ impl Upvalue {
         Self {
             gc: GcHeader::new(11),
             value: Cell::new(value),
-            stack_slot: Cell::new(None),
+            stack_index: Cell::new(None),
             next: Cell::new(None),
         }
     }
 
     /// Check if upvalue is open (still on stack)
     pub fn is_open(&self) -> bool {
-        self.stack_slot.get().is_some()
+        self.stack_index.get().is_some()
     }
 
-    /// Get the upvalue's current value
+    /// Get the upvalue's current value (for closed upvalues only)
+    /// For open upvalues, use get_from_stack instead
     pub fn get(&self) -> Value {
-        if let Some(slot) = self.stack_slot.get() {
-            unsafe { *slot }
+        self.value.get()
+    }
+
+    /// Get value from stack if open, otherwise from internal storage
+    pub fn get_from_stack(&self, stack: &[Value]) -> Value {
+        if let Some(index) = self.stack_index.get() {
+            if index < stack.len() {
+                stack[index]
+            } else {
+                Value::nil()
+            }
         } else {
             self.value.get()
         }
@@ -190,29 +200,38 @@ impl Upvalue {
 
     /// Set the upvalue's value
     pub fn set(&self, value: Value) {
-        if let Some(slot) = self.stack_slot.get() {
-            unsafe { *slot = value }
+        self.value.set(value);
+    }
+
+    /// Set value in stack if open, otherwise in internal storage
+    pub fn set_in_stack(&self, stack: &mut [Value], value: Value) {
+        if let Some(index) = self.stack_index.get() {
+            if index < stack.len() {
+                stack[index] = value;
+            }
         } else {
             self.value.set(value);
         }
     }
 
-    /// Close the upvalue (move value from stack to internal storage)
-    pub fn close(&self) {
-        if let Some(slot) = self.stack_slot.get() {
-            self.value.set(unsafe { *slot });
-            self.stack_slot.set(None);
+    /// Close the upvalue (copy value from stack to internal storage)
+    pub fn close_with_stack(&self, stack: &[Value]) {
+        if let Some(index) = self.stack_index.get() {
+            if index < stack.len() {
+                self.value.set(stack[index]);
+            }
+            self.stack_index.set(None);
         }
     }
 
-    /// Get the stack slot pointer (if open)
-    pub fn get_stack_slot(&self) -> Option<*mut Value> {
-        self.stack_slot.get()
+    /// Get the stack index (if open)
+    pub fn get_stack_index(&self) -> Option<usize> {
+        self.stack_index.get()
     }
 
-    /// Alias for get_stack_slot
-    pub fn stack_slot(&self) -> Option<*mut Value> {
-        self.stack_slot.get()
+    /// Alias for get_stack_index
+    pub fn stack_index(&self) -> Option<usize> {
+        self.stack_index.get()
     }
 }
 

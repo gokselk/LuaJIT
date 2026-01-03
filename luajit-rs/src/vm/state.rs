@@ -324,21 +324,21 @@ impl State {
         self.set_global(name, Value::function(func_ref));
     }
 
-    /// Find or create an open upvalue for a stack slot.
-    /// Reuses existing upvalue if one exists for this slot.
-    pub fn find_or_create_upvalue(&mut self, slot_ptr: *mut Value) -> GcRef<Upvalue> {
-        // Walk the list (sorted by slot address, highest first)
+    /// Find or create an open upvalue for a stack index.
+    /// Reuses existing upvalue if one exists for this index.
+    pub fn find_or_create_upvalue(&mut self, slot_index: usize) -> GcRef<Upvalue> {
+        // Walk the list (sorted by slot index, highest first)
         let mut prev: Option<GcRef<Upvalue>> = None;
         let mut current = self.open_upvalues;
 
         while let Some(uv_ref) = current {
             let uv = unsafe { &*uv_ref.as_ptr() };
-            if let Some(uv_slot) = uv.stack_slot() {
-                if uv_slot == slot_ptr {
+            if let Some(uv_index) = uv.stack_index() {
+                if uv_index == slot_index {
                     // Found existing upvalue for this slot
                     return uv_ref;
                 }
-                if (uv_slot as usize) < (slot_ptr as usize) {
+                if uv_index < slot_index {
                     // Insert before this one
                     break;
                 }
@@ -348,7 +348,7 @@ impl State {
         }
 
         // Create new upvalue
-        let new_uv = Upvalue::new_open(slot_ptr);
+        let new_uv = Upvalue::new_open(slot_index);
         let new_uv_ref = self.gc.alloc(new_uv);
 
         // Link into list
@@ -368,13 +368,13 @@ impl State {
     }
 
     /// Close all upvalues for stack slots >= level
-    pub fn close_upvalues(&mut self, level: *mut Value) {
+    pub fn close_upvalues(&mut self, level: usize) {
         while let Some(uv_ref) = self.open_upvalues {
             let uv = unsafe { &*uv_ref.as_ptr() };
-            if let Some(slot) = uv.stack_slot() {
-                if (slot as usize) >= (level as usize) {
-                    // Close this upvalue
-                    uv.close();
+            if let Some(slot_index) = uv.stack_index() {
+                if slot_index >= level {
+                    // Close this upvalue, passing the stack for value capture
+                    uv.close_with_stack(self.stack.all_values());
                     self.open_upvalues = uv.next.get();
                 } else {
                     break;

@@ -604,7 +604,9 @@ impl<'a> Interpreter<'a> {
                         let val = unsafe {
                             let c = &*closure.as_ptr();
                             if let Some(uv) = c.upvalues.get(d) {
-                                (*uv.as_ptr()).get()
+                                let uv_ref = &*uv.as_ptr();
+                                // Use stack-based access for open upvalues
+                                uv_ref.get_from_stack(self.state.stack.all_values())
                             } else {
                                 Value::nil()
                             }
@@ -621,7 +623,9 @@ impl<'a> Interpreter<'a> {
                         unsafe {
                             let c = &*closure.as_ptr();
                             if let Some(uv) = c.upvalues.get(a) {
-                                (*uv.as_ptr()).set(val);
+                                let uv_ref = &*uv.as_ptr();
+                                // Use stack-based access for open upvalues
+                                uv_ref.set_in_stack(self.state.stack.all_values_mut(), val);
                             }
                         }
                     }
@@ -860,11 +864,10 @@ impl<'a> Interpreter<'a> {
                             // Set up upvalues based on the child proto's upvalue descriptors
                             for uv_desc in &child_proto.upvalues {
                                 let upvalue = if uv_desc.in_stack {
-                                    // Capture from current stack frame - use the open upvalue list
+                                    // Capture from current stack frame - use index, not pointer
                                     let abs_slot = base + uv_desc.index as usize;
-                                    let slot_ptr = self.state.stack.slot_ptr(abs_slot);
-                                    // Find or create an upvalue for this slot
-                                    self.state.find_or_create_upvalue(slot_ptr)
+                                    // Find or create an upvalue for this slot index
+                                    self.state.find_or_create_upvalue(abs_slot)
                                 } else {
                                     // Get from parent closure's upvalues
                                     unsafe {
@@ -888,10 +891,9 @@ impl<'a> Interpreter<'a> {
 
                 // Close upvalues
                 Opcode::UCLO => {
-                    // Close upvalues for slots >= A
+                    // Close upvalues for slots >= A (using index, not pointer)
                     let close_slot = base + a;
-                    let slot_ptr = self.state.stack.slot_ptr(close_slot);
-                    self.state.close_upvalues(slot_ptr);
+                    self.state.close_upvalues(close_slot);
 
                     // Handle jump if present
                     let offset = instr.jump();

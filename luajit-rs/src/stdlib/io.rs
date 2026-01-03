@@ -5,9 +5,23 @@ use crate::vm::State;
 use std::io::{self, Write, BufRead};
 
 pub fn register_io(state: &mut State) {
-    state.register_function("io.write", io_write);
-    state.register_function("io.read", io_read);
-    state.register_function("io.flush", io_flush);
+    // Create io table
+    let io_table = state.create_table(0, 8);
+
+    // Helper to add a function to the table
+    let add_func = |state: &mut State, tbl: crate::value::GcRef<crate::value::Table>, name: &str, func: crate::value::NativeFn| {
+        let native = crate::value::NativeFunction::new(func);
+        let func_ref = state.gc.alloc(crate::value::Function::Native(native));
+        let key = state.intern_string(name);
+        unsafe { (*tbl.as_ptr()).set(key, Value::function(func_ref)); }
+    };
+
+    // Add functions to io table
+    add_func(state, io_table, "write", io_write);
+    add_func(state, io_table, "read", io_read);
+    add_func(state, io_table, "flush", io_flush);
+
+    state.set_global("io", Value::table(io_table));
 }
 
 fn io_write(state: &mut State) -> LuaResult<usize> {

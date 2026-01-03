@@ -165,6 +165,16 @@ impl Stack {
         &self.values[self.base..self.top]
     }
 
+    /// Get all values as a slice (for upvalue access)
+    pub fn all_values(&self) -> &[Value] {
+        &self.values
+    }
+
+    /// Get all values as a mutable slice (for upvalue access)
+    pub fn all_values_mut(&mut self) -> &mut [Value] {
+        &mut self.values
+    }
+
     /// Ensure stack has enough space
     pub fn ensure(&mut self, n: usize) -> LuaResult<()> {
         let needed = self.top + n;
