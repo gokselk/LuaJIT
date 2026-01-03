@@ -1,0 +1,209 @@
+//! String library
+
+use crate::value::{Value, LuaError, LuaResult};
+use crate::vm::State;
+
+pub fn register_string(state: &mut State) {
+    state.register_function("string.byte", string_byte);
+    state.register_function("string.char", string_char);
+    state.register_function("string.len", string_len);
+    state.register_function("string.lower", string_lower);
+    state.register_function("string.upper", string_upper);
+    state.register_function("string.rep", string_rep);
+    state.register_function("string.reverse", string_reverse);
+    state.register_function("string.sub", string_sub);
+    state.register_function("string.format", string_format);
+}
+
+fn string_byte(state: &mut State) -> LuaResult<usize> {
+    let s = state.get_value(1);
+    let i = state.to_integer(2).unwrap_or(1);
+    let j = state.to_integer(3).unwrap_or(i);
+
+    if let Some(str_ref) = s.as_string() {
+        let str_val = unsafe { &*str_ref.as_ptr() };
+        let bytes = str_val.as_bytes();
+        let len = bytes.len() as i32;
+
+        let start = if i >= 0 { i - 1 } else { len + i }.max(0) as usize;
+        let end = if j >= 0 { j } else { len + j + 1 }.min(len) as usize;
+
+        if start < end && start < bytes.len() {
+            for byte in &bytes[start..end.min(bytes.len())] {
+                state.push(Value::integer(*byte as i32))?;
+            }
+            Ok(end - start)
+        } else {
+            Ok(0)
+        }
+    } else {
+        Err(LuaError::ArgumentError {
+            func: "string.byte".to_string(),
+            arg: 1,
+            msg: "string expected".to_string(),
+        })
+    }
+}
+
+fn string_char(state: &mut State) -> LuaResult<usize> {
+    let n = state.get_top();
+    let mut result = String::with_capacity(n);
+
+    for i in 1..=n as i32 {
+        let c = state.to_integer(i).ok_or_else(|| LuaError::ArgumentError {
+            func: "string.char".to_string(),
+            arg: i as usize,
+            msg: "number expected".to_string(),
+        })?;
+        if c < 0 || c > 255 {
+            return Err(LuaError::ArgumentError {
+                func: "string.char".to_string(),
+                arg: i as usize,
+                msg: "value out of range".to_string(),
+            });
+        }
+        result.push(c as u8 as char);
+    }
+
+    let val = state.intern_string(&result);
+    state.push(val)?;
+    Ok(1)
+}
+
+fn string_len(state: &mut State) -> LuaResult<usize> {
+    let s = state.get_value(1);
+    if let Some(str_ref) = s.as_string() {
+        let len = unsafe { (*str_ref.as_ptr()).len() };
+        state.push(Value::integer(len as i32))?;
+        Ok(1)
+    } else {
+        Err(LuaError::ArgumentError {
+            func: "string.len".to_string(),
+            arg: 1,
+            msg: "string expected".to_string(),
+        })
+    }
+}
+
+fn string_lower(state: &mut State) -> LuaResult<usize> {
+    let s = state.get_value(1);
+    if let Some(str_ref) = s.as_string() {
+        let str_val = unsafe { &*str_ref.as_ptr() };
+        if let Some(s) = str_val.as_str() {
+            let result = s.to_lowercase();
+            let val = state.intern_string(&result);
+            state.push(val)?;
+            return Ok(1);
+        }
+    }
+    Err(LuaError::ArgumentError {
+        func: "string.lower".to_string(),
+        arg: 1,
+        msg: "string expected".to_string(),
+    })
+}
+
+fn string_upper(state: &mut State) -> LuaResult<usize> {
+    let s = state.get_value(1);
+    if let Some(str_ref) = s.as_string() {
+        let str_val = unsafe { &*str_ref.as_ptr() };
+        if let Some(s) = str_val.as_str() {
+            let result = s.to_uppercase();
+            let val = state.intern_string(&result);
+            state.push(val)?;
+            return Ok(1);
+        }
+    }
+    Err(LuaError::ArgumentError {
+        func: "string.upper".to_string(),
+        arg: 1,
+        msg: "string expected".to_string(),
+    })
+}
+
+fn string_rep(state: &mut State) -> LuaResult<usize> {
+    let s = state.get_value(1);
+    let n = state.to_integer(2).unwrap_or(0);
+
+    if let Some(str_ref) = s.as_string() {
+        let str_val = unsafe { &*str_ref.as_ptr() };
+        if let Some(s) = str_val.as_str() {
+            let result = s.repeat(n.max(0) as usize);
+            let val = state.intern_string(&result);
+            state.push(val)?;
+            return Ok(1);
+        }
+    }
+    Err(LuaError::ArgumentError {
+        func: "string.rep".to_string(),
+        arg: 1,
+        msg: "string expected".to_string(),
+    })
+}
+
+fn string_reverse(state: &mut State) -> LuaResult<usize> {
+    let s = state.get_value(1);
+    if let Some(str_ref) = s.as_string() {
+        let str_val = unsafe { &*str_ref.as_ptr() };
+        if let Some(s) = str_val.as_str() {
+            let result: String = s.chars().rev().collect();
+            let val = state.intern_string(&result);
+            state.push(val)?;
+            return Ok(1);
+        }
+    }
+    Err(LuaError::ArgumentError {
+        func: "string.reverse".to_string(),
+        arg: 1,
+        msg: "string expected".to_string(),
+    })
+}
+
+fn string_sub(state: &mut State) -> LuaResult<usize> {
+    let s = state.get_value(1);
+    let i = state.to_integer(2).unwrap_or(1);
+    let j = state.to_integer(3).unwrap_or(-1);
+
+    if let Some(str_ref) = s.as_string() {
+        let str_val = unsafe { &*str_ref.as_ptr() };
+        if let Some(s) = str_val.as_str() {
+            let len = s.len() as i32;
+            let start = if i >= 0 { i - 1 } else { (len + i).max(0) } as usize;
+            let end = if j >= 0 { j } else { len + j + 1 } as usize;
+
+            let result = if start < end && start < s.len() {
+                s[start..end.min(s.len())].to_string()
+            } else {
+                String::new()
+            };
+            let val = state.intern_string(&result);
+            state.push(val)?;
+            return Ok(1);
+        }
+    }
+    Err(LuaError::ArgumentError {
+        func: "string.sub".to_string(),
+        arg: 1,
+        msg: "string expected".to_string(),
+    })
+}
+
+fn string_format(state: &mut State) -> LuaResult<usize> {
+    // Simplified format - only handles basic cases
+    let fmt = state.get_value(1);
+    if let Some(str_ref) = fmt.as_string() {
+        let str_val = unsafe { &*str_ref.as_ptr() };
+        if let Some(fmt_str) = str_val.as_str() {
+            // Very simplified - just return the format string
+            let result = fmt_str.to_string();
+            let val = state.intern_string(&result);
+            state.push(val)?;
+            return Ok(1);
+        }
+    }
+    Err(LuaError::ArgumentError {
+        func: "string.format".to_string(),
+        arg: 1,
+        msg: "string expected".to_string(),
+    })
+}

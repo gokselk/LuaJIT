@@ -1,0 +1,76 @@
+[package]
+name = "luajit-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["LuaJIT-RS Contributors"]
+description = "A Rust port of LuaJIT using Cranelift for JIT compilation"
+license = "MIT"
+repository = "https://github.com/example/luajit-rs"
+keywords = ["lua", "jit", "cranelift", "interpreter", "scripting"]
+categories = ["compilers", "development-tools"]
+
+[dependencies]
+# Cranelift for JIT compilation
+cranelift = "0.116"
+cranelift-module = "0.116"
+cranelift-jit = "0.116"
+cranelift-frontend = "0.116"
+cranelift-codegen = "0.116"
+cranelift-native = "0.116"
+target-lexicon = "0.12"
+
+# Error handling and utilities
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Collections and data structures
+indexmap = "2.7"
+hashbrown = "0.15"
+smallvec = "1.13"
+bumpalo = "3.16"
+
+# String interning
+string-interner = "0.18"
+
+# Numeric utilities
+ordered-float = "4.6"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Memory management
+typed-arena = "2.0"
+
+# Unicode support for Lua strings
+unicode-segmentation = "1.12"
+
+# For reading Lua bytecode files
+byteorder = "1.5"
+
+# For hash functions
+rustc-hash = "2.1"
+
+# Bitflags for various flags
+bitflags = "2.8"
+
+# Number formatting matching Lua's behavior
+ryu = "1.0"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "benchmarks"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1
