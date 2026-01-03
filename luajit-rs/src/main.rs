@@ -25,6 +25,10 @@ struct Cli {
     #[arg(short, long)]
     interactive: bool,
 
+    /// Print version information (short form, --version also available)
+    #[arg(short = 'v')]
+    version: bool,
+
     /// Disable JIT compilation
     #[arg(long)]
     no_jit: bool,
@@ -60,6 +64,13 @@ fn main() {
     env_logger::init();
 
     let cli = Cli::parse();
+
+    if cli.version {
+        println!("{}", VERSION);
+        println!("Copyright (C) 2024 LuaJIT-RS Contributors");
+        println!("Built with Cranelift code generator");
+        return;
+    }
 
     // Create Lua state
     let mut state = new_state();
