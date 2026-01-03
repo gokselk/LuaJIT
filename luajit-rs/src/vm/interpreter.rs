@@ -612,7 +612,8 @@ impl<'a> Interpreter<'a> {
 
                 // Return operations
                 Opcode::RET0 => {
-                    return self.do_return(base, 0);
+                    // No results - set top to func_idx (base - 1) to indicate 0 results
+                    return self.do_return(base - 1, 0);
                 }
 
                 Opcode::RET1 => {
