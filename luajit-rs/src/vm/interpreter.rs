@@ -88,9 +88,22 @@ impl<'a> Interpreter<'a> {
 
         // Clean up - restore caller's stack state
         self.state.call_stack.pop();
+
+        // Results are placed starting at func_idx by do_return
+        // Current top = func_idx + actual_num_results
+        if nresults >= 0 {
+            // Fixed number of results requested - pad with nil if needed
+            let wanted = nresults as usize;
+            let current_top = self.state.stack.top();
+            let actual = current_top.saturating_sub(func_idx);
+            for i in actual..wanted {
+                self.state.stack.set(func_idx + i, Value::nil());
+            }
+            self.state.stack.set_top(func_idx + wanted);
+        }
+        // When nresults == -1, keep the top set by do_return (which includes all actual results)
+
         self.state.stack.set_base(saved_base);
-        // The return value is at func_idx; set top to include it
-        self.state.stack.set_top(func_idx + 1.max(saved_top));
 
         result
     }

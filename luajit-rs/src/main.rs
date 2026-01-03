@@ -25,9 +25,9 @@ struct Cli {
     #[arg(short, long)]
     interactive: bool,
 
-    /// Print version information (short form, --version also available)
-    #[arg(short = 'v')]
-    version: bool,
+    /// Print version information
+    #[arg(short = 'V', long = "show-version")]
+    show_version: bool,
 
     /// Disable JIT compilation
     #[arg(long)]
@@ -65,7 +65,7 @@ fn main() {
 
     let cli = Cli::parse();
 
-    if cli.version {
+    if cli.show_version {
         println!("{}", VERSION);
         println!("Copyright (C) 2024 LuaJIT-RS Contributors");
         println!("Built with Cranelift code generator");

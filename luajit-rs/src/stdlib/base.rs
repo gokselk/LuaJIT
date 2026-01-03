@@ -126,7 +126,9 @@ fn lua_pcall(state: &mut State) -> LuaResult<usize> {
         Ok(()) => {
             // Success - prepend true
             let nresults = state.get_top();
-            // Shift results and add true at the beginning
+            // Extend stack to make room for the prepended 'true'
+            state.set_top(nresults + 1);
+            // Shift results right by 1 and add true at the beginning
             for i in (1..=nresults as i32).rev() {
                 let val = state.get_value(i);
                 state.set_value(i + 1, val);
@@ -156,6 +158,9 @@ fn lua_xpcall(state: &mut State) -> LuaResult<usize> {
     match state.call(nargs, -1) {
         Ok(()) => {
             let nresults = state.get_top();
+            // Extend stack to make room for the prepended 'true'
+            state.set_top(nresults + 1);
+            // Shift results right by 1 and add true at the beginning
             for i in (1..=nresults as i32).rev() {
                 let val = state.get_value(i);
                 state.set_value(i + 1, val);
