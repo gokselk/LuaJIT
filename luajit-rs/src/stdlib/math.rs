@@ -75,36 +75,36 @@ pub fn register_math(state: &mut State) {
     state.set_global("math", Value::table(math));
 }
 
-fn get_num(state: &State, idx: i32) -> LuaResult<f64> {
+fn get_num(state: &State, idx: i32, func_name: &str) -> LuaResult<f64> {
     state.to_number(idx).ok_or_else(|| LuaError::ArgumentError {
-        func: "math".to_string(),
+        func: func_name.to_string(),
         arg: idx as usize,
         msg: "number expected".to_string(),
     })
 }
 
 fn math_abs(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "abs")?;
     state.push(Value::number(n.abs()))?;
     Ok(1)
 }
 
 fn math_acos(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "acos")?;
     state.push(Value::number(n.acos()))?;
     Ok(1)
 }
 
 fn math_asin(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "asin")?;
     state.push(Value::number(n.asin()))?;
     Ok(1)
 }
 
 fn math_atan(state: &mut State) -> LuaResult<usize> {
-    let y = get_num(state, 1)?;
+    let y = get_num(state, 1, "atan")?;
     if state.get_top() >= 2 {
-        let x = get_num(state, 2)?;
+        let x = get_num(state, 2, "atan")?;
         state.push(Value::number(y.atan2(x)))?;
     } else {
         state.push(Value::number(y.atan()))?;
@@ -113,46 +113,46 @@ fn math_atan(state: &mut State) -> LuaResult<usize> {
 }
 
 fn math_ceil(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "ceil")?;
     state.push(Value::number(n.ceil()))?;
     Ok(1)
 }
 
 fn math_cos(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "cos")?;
     state.push(Value::number(n.cos()))?;
     Ok(1)
 }
 
 fn math_deg(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "deg")?;
     state.push(Value::number(n.to_degrees()))?;
     Ok(1)
 }
 
 fn math_exp(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "exp")?;
     state.push(Value::number(n.exp()))?;
     Ok(1)
 }
 
 fn math_floor(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "floor")?;
     state.push(Value::number(n.floor()))?;
     Ok(1)
 }
 
 fn math_fmod(state: &mut State) -> LuaResult<usize> {
-    let x = get_num(state, 1)?;
-    let y = get_num(state, 2)?;
+    let x = get_num(state, 1, "fmod")?;
+    let y = get_num(state, 2, "fmod")?;
     state.push(Value::number(x % y))?;
     Ok(1)
 }
 
 fn math_log(state: &mut State) -> LuaResult<usize> {
-    let x = get_num(state, 1)?;
+    let x = get_num(state, 1, "log")?;
     let result = if state.get_top() >= 2 {
-        let base = get_num(state, 2)?;
+        let base = get_num(state, 2, "log")?;
         x.log(base)
     } else {
         x.ln()
@@ -165,15 +165,15 @@ fn math_max(state: &mut State) -> LuaResult<usize> {
     let n = state.get_top();
     if n == 0 {
         return Err(LuaError::ArgumentError {
-            func: "math.max".to_string(),
+            func: "max".to_string(),
             arg: 1,
             msg: "value expected".to_string(),
         });
     }
 
-    let mut max = get_num(state, 1)?;
+    let mut max = get_num(state, 1, "max")?;
     for i in 2..=n as i32 {
-        let v = get_num(state, i)?;
+        let v = get_num(state, i, "max")?;
         if v > max {
             max = v;
         }
@@ -186,15 +186,15 @@ fn math_min(state: &mut State) -> LuaResult<usize> {
     let n = state.get_top();
     if n == 0 {
         return Err(LuaError::ArgumentError {
-            func: "math.min".to_string(),
+            func: "min".to_string(),
             arg: 1,
             msg: "value expected".to_string(),
         });
     }
 
-    let mut min = get_num(state, 1)?;
+    let mut min = get_num(state, 1, "min")?;
     for i in 2..=n as i32 {
-        let v = get_num(state, i)?;
+        let v = get_num(state, i, "min")?;
         if v < min {
             min = v;
         }
@@ -204,7 +204,7 @@ fn math_min(state: &mut State) -> LuaResult<usize> {
 }
 
 fn math_modf(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "modf")?;
     let int_part = n.trunc();
     let frac_part = n.fract();
     state.push(Value::number(int_part))?;
@@ -213,7 +213,7 @@ fn math_modf(state: &mut State) -> LuaResult<usize> {
 }
 
 fn math_rad(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "rad")?;
     state.push(Value::number(n.to_radians()))?;
     Ok(1)
 }
@@ -228,7 +228,7 @@ fn math_random(state: &mut State) -> LuaResult<usize> {
         state.push(Value::number(r))?;
     } else if n == 1 {
         // Return [1, m]
-        let m = get_num(state, 1)? as u64;
+        let m = get_num(state, 1, "random")? as u64;
         if m == 0 {
             return Err(LuaError::RuntimeError("bad argument #1 (interval is empty)".to_string()));
         }
@@ -236,8 +236,8 @@ fn math_random(state: &mut State) -> LuaResult<usize> {
         state.push(Value::number(r as f64))?;
     } else {
         // Return [m, n]
-        let m = get_num(state, 1)? as i64;
-        let upper = get_num(state, 2)? as i64;
+        let m = get_num(state, 1, "random")? as i64;
+        let upper = get_num(state, 2, "random")? as i64;
         if upper < m {
             return Err(LuaError::RuntimeError("bad argument #2 (interval is empty)".to_string()));
         }
@@ -249,7 +249,7 @@ fn math_random(state: &mut State) -> LuaResult<usize> {
 }
 
 fn math_randomseed(state: &mut State) -> LuaResult<usize> {
-    let seed = get_num(state, 1)? as u64;
+    let seed = get_num(state, 1, "randomseed")? as u64;
     // Ensure seed is non-zero (xorshift requires non-zero state)
     let seed = if seed == 0 { 1 } else { seed };
     RANDOM_STATE.store(seed, Ordering::Relaxed);
@@ -257,19 +257,19 @@ fn math_randomseed(state: &mut State) -> LuaResult<usize> {
 }
 
 fn math_sin(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "sin")?;
     state.push(Value::number(n.sin()))?;
     Ok(1)
 }
 
 fn math_sqrt(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "sqrt")?;
     state.push(Value::number(n.sqrt()))?;
     Ok(1)
 }
 
 fn math_tan(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "tan")?;
     state.push(Value::number(n.tan()))?;
     Ok(1)
 }
@@ -306,29 +306,29 @@ fn math_type(state: &mut State) -> LuaResult<usize> {
 }
 
 fn math_ult(state: &mut State) -> LuaResult<usize> {
-    let m = get_num(state, 1)? as u64;
-    let n = get_num(state, 2)? as u64;
+    let m = get_num(state, 1, "ult")? as u64;
+    let n = get_num(state, 2, "ult")? as u64;
     state.push(Value::boolean(m < n))?;
     Ok(1)
 }
 
 fn math_atan2(state: &mut State) -> LuaResult<usize> {
-    let y = get_num(state, 1)?;
-    let x = get_num(state, 2)?;
+    let y = get_num(state, 1, "atan2")?;
+    let x = get_num(state, 2, "atan2")?;
     state.push(Value::number(y.atan2(x)))?;
     Ok(1)
 }
 
 fn math_ldexp(state: &mut State) -> LuaResult<usize> {
-    let m = get_num(state, 1)?;
-    let e = get_num(state, 2)? as i32;
+    let m = get_num(state, 1, "ldexp")?;
+    let e = get_num(state, 2, "ldexp")? as i32;
     // ldexp(m, e) = m * 2^e
     state.push(Value::number(m * 2f64.powi(e)))?;
     Ok(1)
 }
 
 fn math_frexp(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "frexp")?;
     if n == 0.0 {
         state.push(Value::number(0.0))?;
         state.push(Value::number(0.0))?;
@@ -355,32 +355,32 @@ fn decode_float(n: f64) -> (u64, i32, i8) {
 }
 
 fn math_log10(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "log10")?;
     state.push(Value::number(n.log10()))?;
     Ok(1)
 }
 
 fn math_pow(state: &mut State) -> LuaResult<usize> {
-    let x = get_num(state, 1)?;
-    let y = get_num(state, 2)?;
+    let x = get_num(state, 1, "pow")?;
+    let y = get_num(state, 2, "pow")?;
     state.push(Value::number(x.powf(y)))?;
     Ok(1)
 }
 
 fn math_cosh(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "cosh")?;
     state.push(Value::number(n.cosh()))?;
     Ok(1)
 }
 
 fn math_sinh(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "sinh")?;
     state.push(Value::number(n.sinh()))?;
     Ok(1)
 }
 
 fn math_tanh(state: &mut State) -> LuaResult<usize> {
-    let n = get_num(state, 1)?;
+    let n = get_num(state, 1, "tanh")?;
     state.push(Value::number(n.tanh()))?;
     Ok(1)
 }

@@ -307,6 +307,124 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Call a comparison metamethod and return the boolean result
+    fn call_compare_metamethod(&mut self, mm: Value, a: Value, b: Value) -> LuaResult<bool> {
+        let call_base = self.state.stack.top();
+        self.state.stack.set(call_base, mm);
+        self.state.stack.set(call_base + 1, a);
+        self.state.stack.set(call_base + 2, b);
+        self.state.stack.set_top(call_base + 3);
+
+        self.call(call_base, 2, 1)?;
+
+        let result = self.state.stack.get(call_base);
+        Ok(result.is_truthy())
+    }
+
+    /// Compare with __lt metamethod fallback
+    /// Returns Ok(Some(bool)) if comparison succeeded, Ok(None) if no metamethod
+    fn compare_lt(&mut self, a: Value, b: Value) -> LuaResult<Option<bool>> {
+        // Try __lt from first operand
+        if let Some(mm) = self.get_metamethod(&a, "__lt") {
+            return Ok(Some(self.call_compare_metamethod(mm, a, b)?));
+        }
+        // Try __lt from second operand
+        if let Some(mm) = self.get_metamethod(&b, "__lt") {
+            return Ok(Some(self.call_compare_metamethod(mm, a, b)?));
+        }
+        Ok(None)
+    }
+
+    /// Compare with __le metamethod fallback
+    /// Returns Ok(Some(bool)) if comparison succeeded, Ok(None) if no metamethod
+    fn compare_le(&mut self, a: Value, b: Value) -> LuaResult<Option<bool>> {
+        // Try __le from first operand
+        if let Some(mm) = self.get_metamethod(&a, "__le") {
+            return Ok(Some(self.call_compare_metamethod(mm, a.clone(), b.clone())?));
+        }
+        // Try __le from second operand
+        if let Some(mm) = self.get_metamethod(&b, "__le") {
+            return Ok(Some(self.call_compare_metamethod(mm, a.clone(), b.clone())?));
+        }
+        // Fall back to not(b < a) if __lt is available
+        if let Some(result) = self.compare_lt(b, a)? {
+            return Ok(Some(!result));
+        }
+        Ok(None)
+    }
+
+    /// Handle __index metamethod for table access
+    /// Returns the value (possibly from metamethod) or nil
+    fn table_index(&mut self, table: Value, key: Value, result_slot: usize) -> LuaResult<()> {
+        if let Some(t) = table.as_table() {
+            let val = unsafe { (*t.as_ptr()).get(&key) };
+            if !val.is_nil() {
+                self.state.stack.set(result_slot, val);
+                return Ok(());
+            }
+            // Key not found, try __index
+            if let Some(mm) = self.get_metamethod(&table, "__index") {
+                if let Some(idx_table) = mm.as_table() {
+                    // __index is a table, look up in it
+                    let val = unsafe { (*idx_table.as_ptr()).get(&key) };
+                    self.state.stack.set(result_slot, val);
+                } else if mm.as_function().is_some() {
+                    // __index is a function, call it
+                    let call_base = self.state.stack.top();
+                    self.state.stack.set(call_base, mm);
+                    self.state.stack.set(call_base + 1, table);
+                    self.state.stack.set(call_base + 2, key);
+                    self.state.stack.set_top(call_base + 3);
+                    self.call(call_base, 2, 1)?;
+                    let result = self.state.stack.get(call_base);
+                    self.state.stack.set(result_slot, result);
+                } else {
+                    self.state.stack.set(result_slot, Value::nil());
+                }
+                return Ok(());
+            }
+            self.state.stack.set(result_slot, Value::nil());
+            Ok(())
+        } else {
+            Err(LuaError::IndexError(table.lua_type()))
+        }
+    }
+
+    /// Handle __newindex metamethod for table assignment
+    fn table_newindex(&mut self, table: Value, key: Value, val: Value) -> LuaResult<()> {
+        if let Some(t) = table.as_table() {
+            // Check if key already exists (rawget)
+            let existing = unsafe { (*t.as_ptr()).get(&key) };
+            if !existing.is_nil() {
+                // Key exists, just set it (no metamethod)
+                unsafe { (*t.as_ptr()).set(key, val) };
+                return Ok(());
+            }
+            // Key doesn't exist, try __newindex
+            if let Some(mm) = self.get_metamethod(&table, "__newindex") {
+                if let Some(idx_table) = mm.as_table() {
+                    // __newindex is a table, set in it
+                    unsafe { (*idx_table.as_ptr()).set(key, val) };
+                } else if mm.as_function().is_some() {
+                    // __newindex is a function, call it
+                    let call_base = self.state.stack.top();
+                    self.state.stack.set(call_base, mm);
+                    self.state.stack.set(call_base + 1, table);
+                    self.state.stack.set(call_base + 2, key);
+                    self.state.stack.set(call_base + 3, val);
+                    self.state.stack.set_top(call_base + 4);
+                    self.call(call_base, 3, 0)?;
+                }
+                return Ok(());
+            }
+            // No metamethod, just set
+            unsafe { (*t.as_ptr()).set(key, val) };
+            Ok(())
+        } else {
+            Err(LuaError::IndexError(table.lua_type()))
+        }
+    }
+
     /// Main execution loop
     fn execute(&mut self) -> LuaResult<()> {
         loop {
@@ -458,13 +576,13 @@ impl<'a> Interpreter<'a> {
                     let va = self.state.stack.get(base + a);
                     let vd = self.state.stack.get(base + d);
 
-                    let cmp = if let (Some(a), Some(b)) = (va.as_number(), vd.as_number()) {
+                    let cmp = if let (Some(na), Some(nb)) = (va.as_number(), vd.as_number()) {
                         // Number comparison
                         match op {
-                            Opcode::ISLT => a < b,
-                            Opcode::ISGE => a >= b,
-                            Opcode::ISLE => a <= b,
-                            Opcode::ISGT => a > b,
+                            Opcode::ISLT => na < nb,
+                            Opcode::ISGE => na >= nb,
+                            Opcode::ISLE => na <= nb,
+                            Opcode::ISGT => na > nb,
                             _ => unreachable!(),
                         }
                     } else if let (Some(sa), Some(sb)) = (va.as_string(), vd.as_string()) {
@@ -481,7 +599,18 @@ impl<'a> Interpreter<'a> {
                             _ => unreachable!(),
                         }
                     } else {
-                        return Err(LuaError::CompareError(va.lua_type(), vd.lua_type()));
+                        // Try metamethods
+                        let result = match op {
+                            Opcode::ISLT => self.compare_lt(va.clone(), vd.clone())?,
+                            Opcode::ISGT => self.compare_lt(vd.clone(), va.clone())?,
+                            Opcode::ISLE => self.compare_le(va.clone(), vd.clone())?,
+                            Opcode::ISGE => self.compare_le(vd.clone(), va.clone())?,
+                            _ => unreachable!(),
+                        };
+                        match result {
+                            Some(r) => r,
+                            None => return Err(LuaError::CompareError(va.lua_type(), vd.lua_type())),
+                        }
                     };
 
                     if cmp {
@@ -495,7 +624,25 @@ impl<'a> Interpreter<'a> {
                     let d = instr.d() as usize;
                     let va = self.state.stack.get(base + a);
                     let vd = self.state.stack.get(base + d);
-                    let eq = va.raw_eq(&vd);
+
+                    let eq = if va.raw_eq(&vd) {
+                        // Raw equality always means equal
+                        true
+                    } else {
+                        // Try __eq metamethod for tables
+                        // __eq is called only if both have the same __eq metamethod
+                        let mm_a = self.get_metamethod(&va, "__eq");
+                        let mm_d = self.get_metamethod(&vd, "__eq");
+
+                        match (mm_a, mm_d) {
+                            (Some(mma), Some(mmd)) if mma.raw_eq(&mmd) => {
+                                // Both have the same __eq metamethod
+                                self.call_compare_metamethod(mma, va, vd)?
+                            }
+                            _ => false,
+                        }
+                    };
+
                     let cmp = if op == Opcode::ISEQV { eq } else { !eq };
 
                     if cmp {
@@ -544,9 +691,8 @@ impl<'a> Interpreter<'a> {
                     let table = self.state.stack.get(base + b);
                     let key = self.state.stack.get(base + c);
 
-                    if let Some(t) = table.as_table() {
-                        let val = unsafe { (*t.as_ptr()).get(&key) };
-                        self.state.stack.set(base + a, val);
+                    if table.is_table() {
+                        self.table_index(table, key, base + a)?;
                     } else if table.is_string() {
                         // String indexing: check if numeric (byte access) or string (method)
                         if key.is_string() {
@@ -581,9 +727,8 @@ impl<'a> Interpreter<'a> {
                         frame.get_constant(c)
                     };
 
-                    if let Some(t) = table.as_table() {
-                        let val = unsafe { (*t.as_ptr()).get(&key) };
-                        self.state.stack.set(base + a, val);
+                    if table.is_table() {
+                        self.table_index(table, key, base + a)?;
                     } else if table.is_string() {
                         // String method access: s.sub -> string.sub
                         let string_lib = self.state.get_global("string");
@@ -603,9 +748,10 @@ impl<'a> Interpreter<'a> {
                     let c = instr.c() as usize;
                     let table = self.state.stack.get(base + b);
 
-                    if let Some(t) = table.as_table() {
-                        let val = unsafe { (*t.as_ptr()).get_array(c) };
-                        self.state.stack.set(base + a, val);
+                    if table.is_table() {
+                        // Use integer key for table_index
+                        let key = Value::integer(c as i32);
+                        self.table_index(table, key, base + a)?;
                     } else {
                         return Err(LuaError::IndexError(table.lua_type()));
                     }
@@ -618,11 +764,7 @@ impl<'a> Interpreter<'a> {
                     let val = self.state.stack.get(base + b);
                     let key = self.state.stack.get(base + c);
 
-                    if let Some(t) = table.as_table() {
-                        unsafe { (*t.as_ptr()).set(key, val) };
-                    } else {
-                        return Err(LuaError::IndexError(table.lua_type()));
-                    }
+                    self.table_newindex(table, key, val)?;
                 }
 
                 Opcode::TSETS => {
@@ -640,11 +782,7 @@ impl<'a> Interpreter<'a> {
                         frame.get_constant(c)
                     };
 
-                    if let Some(t) = table.as_table() {
-                        unsafe { (*t.as_ptr()).set(key, val) };
-                    } else {
-                        return Err(LuaError::IndexError(table.lua_type()));
-                    }
+                    self.table_newindex(table, key, val)?;
                 }
 
                 Opcode::TSETB => {
@@ -652,12 +790,9 @@ impl<'a> Interpreter<'a> {
                     let c = instr.c() as usize;
                     let table = self.state.stack.get(base + a);
                     let val = self.state.stack.get(base + b);
+                    let key = Value::integer(c as i32);
 
-                    if let Some(t) = table.as_table() {
-                        unsafe { (*t.as_ptr()).set_array(c, val) };
-                    } else {
-                        return Err(LuaError::IndexError(table.lua_type()));
-                    }
+                    self.table_newindex(table, key, val)?;
                 }
 
                 // Multi-value table set (for varargs and calls in table constructors)

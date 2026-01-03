@@ -273,12 +273,21 @@ fn lua_next(state: &mut State) -> LuaResult<usize> {
 
     if let Some(t) = table.as_table() {
         let t = unsafe { &*t.as_ptr() };
-        if let Some((next_key, next_val)) = t.next(&key) {
-            state.push(next_key)?;
-            state.push(next_val)?;
-            Ok(2)
-        } else {
-            Ok(0)
+        match t.next_checked(&key) {
+            Ok(Some((next_key, next_val))) => {
+                state.push(next_key)?;
+                state.push(next_val)?;
+                Ok(2)
+            }
+            Ok(None) => {
+                // End of iteration
+                state.push(Value::nil())?;
+                Ok(1)
+            }
+            Err(()) => {
+                // Invalid key
+                Err(LuaError::RuntimeError("invalid key to 'next'".to_string()))
+            }
         }
     } else {
         Err(LuaError::ArgumentError {
@@ -417,6 +426,19 @@ fn lua_setmetatable(state: &mut State) -> LuaResult<usize> {
 
     if let Some(t) = table.as_table() {
         let t = unsafe { &*t.as_ptr() };
+
+        // Check for __metatable protection
+        if let Some(existing_mt) = t.get_metatable() {
+            let existing_mt_table = unsafe { &*existing_mt.as_ptr() };
+            let key = state.intern_string("__metatable");
+            let protected = existing_mt_table.get(&key);
+            if !protected.is_nil() {
+                return Err(LuaError::RuntimeError(
+                    "cannot change a protected metatable".to_string(),
+                ));
+            }
+        }
+
         if mt.is_nil() {
             t.set_metatable(None);
         } else if let Some(mt_table) = mt.as_table() {
@@ -439,14 +461,22 @@ fn lua_setmetatable(state: &mut State) -> LuaResult<usize> {
     }
 }
 
-/// getmetatable(object) -> table | nil
+/// getmetatable(object) -> table | nil | __metatable value
 fn lua_getmetatable(state: &mut State) -> LuaResult<usize> {
     let val = state.get_value(1);
 
     if let Some(t) = val.as_table() {
         let t = unsafe { &*t.as_ptr() };
         if let Some(mt) = t.get_metatable() {
-            state.push(Value::table(mt))?;
+            let mt_table = unsafe { &*mt.as_ptr() };
+            // Check for __metatable field
+            let key = state.intern_string("__metatable");
+            let protected = mt_table.get(&key);
+            if !protected.is_nil() {
+                state.push(protected)?;
+            } else {
+                state.push(Value::table(mt))?;
+            }
         } else {
             state.push(Value::nil())?;
         }

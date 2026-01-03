@@ -258,20 +258,28 @@ impl Table {
 
     /// Get the next key-value pair after the given key (for pairs())
     pub fn next(&self, key: &Value) -> Option<(Value, Value)> {
+        self.next_checked(key).ok().flatten()
+    }
+
+    /// Like next(), but returns Err(()) if the key doesn't exist in the table
+    /// Ok(Some(k, v)) - found next key-value pair
+    /// Ok(None) - key exists but was the last element (or nil key with empty table)
+    /// Err(()) - key doesn't exist in the table
+    pub fn next_checked(&self, key: &Value) -> Result<Option<(Value, Value)>, ()> {
         if key.is_nil() {
             // Start iteration
             let array = self.array.borrow();
             for (i, v) in array.iter().enumerate() {
                 if !v.is_nil() {
-                    return Some((Value::integer((i + 1) as i32), *v));
+                    return Ok(Some((Value::integer((i + 1) as i32), *v)));
                 }
             }
             // Check hash part
             let hash = self.hash.borrow();
             if let Some((k, v)) = hash.iter().next() {
-                return Some((self.key_to_value(k), *v));
+                return Ok(Some((self.key_to_value(k), *v)));
             }
-            return None;
+            return Ok(None);
         }
 
         // Continue iteration from the given key
@@ -279,35 +287,48 @@ impl Table {
             if i >= 1 {
                 let idx = i as usize;
                 let array = self.array.borrow();
-                // Look for next non-nil in array
-                for j in idx..array.len() {
-                    if !array[j].is_nil() {
-                        return Some((Value::integer((j + 1) as i32), array[j]));
+                // First check if key exists in array (1-based index)
+                let key_idx = (i - 1) as usize;
+                if key_idx < array.len() && !array[key_idx].is_nil() {
+                    // Key exists in array, look for next non-nil
+                    for j in idx..array.len() {
+                        if !array[j].is_nil() {
+                            return Ok(Some((Value::integer((j + 1) as i32), array[j])));
+                        }
                     }
+                    // Move to hash part
+                    drop(array);
+                    let hash = self.hash.borrow();
+                    if let Some((k, v)) = hash.iter().next() {
+                        return Ok(Some((self.key_to_value(k), *v)));
+                    }
+                    return Ok(None);
                 }
-                // Move to hash part
+                // Integer key but not in array - check hash part
                 drop(array);
-                let hash = self.hash.borrow();
-                if let Some((k, v)) = hash.iter().next() {
-                    return Some((self.key_to_value(k), *v));
-                }
-                return None;
             }
         }
 
         // Key is in hash part, find next entry
-        let table_key = TableKey::from_value(key)?;
+        let table_key = match TableKey::from_value(key) {
+            Some(k) => k,
+            None => return Err(()), // Invalid key type
+        };
         let hash = self.hash.borrow();
         let mut found = false;
         for (k, v) in hash.iter() {
             if found {
-                return Some((self.key_to_value(k), *v));
+                return Ok(Some((self.key_to_value(k), *v)));
             }
             if k == &table_key {
                 found = true;
             }
         }
-        None
+        if found {
+            Ok(None) // Was the last key
+        } else {
+            Err(()) // Key doesn't exist
+        }
     }
 
     /// Convert a TableKey back to a Value
