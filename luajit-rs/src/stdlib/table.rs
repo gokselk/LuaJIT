@@ -4,12 +4,31 @@ use crate::value::{Value, LuaError, LuaResult};
 use crate::vm::State;
 
 pub fn register_table(state: &mut State) {
-    state.register_function("table.concat", table_concat);
-    state.register_function("table.insert", table_insert);
-    state.register_function("table.remove", table_remove);
-    state.register_function("table.sort", table_sort);
-    state.register_function("table.unpack", table_unpack);
-    state.register_function("table.pack", table_pack);
+    // Create table table
+    let table_lib = state.create_table(0, 8);
+
+    // Helper to add a function to the table
+    let add_func = |state: &mut State, tbl: crate::value::GcRef<crate::value::Table>, name: &str, func: crate::value::NativeFn| {
+        let native = crate::value::NativeFunction::new(func);
+        let func_ref = state.gc.alloc(crate::value::Function::Native(native));
+        let key = state.intern_string(name);
+        unsafe { (*tbl.as_ptr()).set(key, Value::function(func_ref)); }
+    };
+
+    // Add functions to table
+    add_func(state, table_lib, "concat", table_concat);
+    add_func(state, table_lib, "insert", table_insert);
+    add_func(state, table_lib, "remove", table_remove);
+    add_func(state, table_lib, "sort", table_sort);
+    add_func(state, table_lib, "unpack", table_unpack);
+    add_func(state, table_lib, "pack", table_pack);
+
+    state.set_global("table", Value::table(table_lib));
+
+    // Also register unpack as a global (Lua 5.1 compatibility)
+    let native = crate::value::NativeFunction::new(table_unpack);
+    let func_ref = state.gc.alloc(crate::value::Function::Native(native));
+    state.set_global("unpack", Value::function(func_ref));
 }
 
 fn table_concat(state: &mut State) -> LuaResult<usize> {

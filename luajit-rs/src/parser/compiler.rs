@@ -786,20 +786,15 @@ impl<'a> Compiler<'a> {
             }
 
             let first_slot = self.fs().free_reg;
+            let num_names = names.len() as u8;
 
-            // Reserve slots
-            for name in &names {
-                let slot = self.fs_mut().reserve_reg();
-                let start_pc = self.fs().current_pc();
-                self.fs_mut().locals.push(LocalVar {
-                    name: name.clone(),
-                    slot,
-                    start_pc,
-                    is_captured: false,
-                });
+            // Reserve slots (but don't register locals yet - locals should not be
+            // visible during initialization, e.g., "local x = x" should get global x)
+            for _ in &names {
+                self.fs_mut().reserve_reg();
             }
 
-            // Parse initializers
+            // Parse initializers BEFORE registering locals
             if self.lexer.match_token(&TokenKind::Eq)? {
                 let mut num_exprs = 0u8;
                 let num_names = names.len() as u8;
@@ -868,6 +863,17 @@ impl<'a> Compiler<'a> {
                     Instruction::ad(Opcode::KNIL, first_slot, names.len() as u16 - 1),
                     line,
                 );
+            }
+
+            // NOW register the locals (after initializers are evaluated)
+            let start_pc = self.fs().current_pc();
+            for (i, name) in names.into_iter().enumerate() {
+                self.fs_mut().locals.push(LocalVar {
+                    name,
+                    slot: first_slot + i as u8,
+                    start_pc,
+                    is_captured: false,
+                });
             }
         }
 

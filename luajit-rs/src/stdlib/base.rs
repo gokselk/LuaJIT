@@ -268,6 +268,8 @@ fn lua_select(state: &mut State) -> LuaResult<usize> {
     if let Some(s) = index.as_string() {
         let s = unsafe { &*s.as_ptr() };
         if s.as_str() == Some("#") {
+            // Clear stack and push just the count
+            state.set_top(0);
             state.push(Value::integer((n - 1) as i32))?;
             return Ok(1);
         }
@@ -277,12 +279,24 @@ fn lua_select(state: &mut State) -> LuaResult<usize> {
         let i = if i >= 0 {
             i as usize
         } else {
-            (n as i32 + i) as usize
+            // Negative index counts from end
+            let pos = (n as i32 + i) as usize;
+            if pos == 0 { 1 } else { pos }
         };
 
         if i > 0 && i <= n - 1 {
             // Return all values from index onwards
+            // Values are at positions 2, 3, ..., n (1 is the index itself)
+            // We want values starting from position i+1
+            let start = i + 1;
             let count = n - i;
+
+            // Move values from position start..n to 1..count
+            for j in 0..count {
+                let val = state.get_value((start + j) as i32);
+                state.set_value((1 + j) as i32, val);
+            }
+            state.set_top(count);
             Ok(count)
         } else {
             Err(LuaError::ArgumentError {

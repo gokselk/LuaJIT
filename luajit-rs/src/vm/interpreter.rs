@@ -436,6 +436,21 @@ impl<'a> Interpreter<'a> {
                     if let Some(t) = table.as_table() {
                         let val = unsafe { (*t.as_ptr()).get(&key) };
                         self.state.stack.set(base + a, val);
+                    } else if table.is_string() {
+                        // String indexing: check if numeric (byte access) or string (method)
+                        if key.is_string() {
+                            // Method access: s["sub"] -> string.sub
+                            let string_lib = self.state.get_global("string");
+                            if let Some(t) = string_lib.as_table() {
+                                let val = unsafe { (*t.as_ptr()).get(&key) };
+                                self.state.stack.set(base + a, val);
+                            } else {
+                                self.state.stack.set(base + a, Value::nil());
+                            }
+                        } else {
+                            // Numeric indexing not typically supported
+                            self.state.stack.set(base + a, Value::nil());
+                        }
                     } else {
                         return Err(LuaError::IndexError(table.lua_type()));
                     }
@@ -458,6 +473,15 @@ impl<'a> Interpreter<'a> {
                     if let Some(t) = table.as_table() {
                         let val = unsafe { (*t.as_ptr()).get(&key) };
                         self.state.stack.set(base + a, val);
+                    } else if table.is_string() {
+                        // String method access: s.sub -> string.sub
+                        let string_lib = self.state.get_global("string");
+                        if let Some(t) = string_lib.as_table() {
+                            let val = unsafe { (*t.as_ptr()).get(&key) };
+                            self.state.stack.set(base + a, val);
+                        } else {
+                            self.state.stack.set(base + a, Value::nil());
+                        }
                     } else {
                         return Err(LuaError::IndexError(table.lua_type()));
                     }
