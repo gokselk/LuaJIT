@@ -1370,6 +1370,85 @@ impl<'a> Compiler<'a> {
             left = ExprDesc::Register(left_reg);
         }
 
+        // Handle comparison operators
+        loop {
+            let op = match &self.lexer.peek()?.kind {
+                TokenKind::Lt => Opcode::ISLT,
+                TokenKind::Gt => Opcode::ISGT,
+                TokenKind::LtEq => Opcode::ISLE,
+                TokenKind::GtEq => Opcode::ISGE,
+                TokenKind::EqEq => Opcode::ISEQV,
+                TokenKind::TildeEq => Opcode::ISNEV,
+                _ => break,
+            };
+            self.lexer.next()?;
+
+            let left_reg = self.expr_to_register(left)?;
+            let right = self.parse_concat_expr()?;
+            let right_reg = self.expr_to_register(right)?;
+
+            let line = self.current_line();
+            let result = self.fs_mut().reserve_reg();
+            self.fs_mut().emit(Instruction::ad(Opcode::KPRI, result, 2), line); // true
+            self.fs_mut().emit(
+                Instruction::ad(op, left_reg, right_reg as u16),
+                line,
+            );
+            self.fs_mut().emit(Instruction::ad(Opcode::KPRI, result, 1), line); // false
+
+            left = ExprDesc::Register(result);
+        }
+
+        // Handle 'and' operator
+        while self.lexer.match_token(&TokenKind::And)? {
+            let left_reg = self.expr_to_register(left)?;
+            let line = self.current_line();
+
+            // Short-circuit: if falsy, skip right side
+            self.fs_mut().emit(Instruction::ad(Opcode::IST, 0, left_reg as u16), line);
+            let skip_jump = self.fs_mut().emit(Instruction::adj(Opcode::JMP, 0, 0), line);
+
+            let right = self.parse_compare_expr()?;
+            let right_reg = self.expr_to_register(right)?;
+
+            if right_reg != left_reg {
+                self.fs_mut().emit(
+                    Instruction::ad(Opcode::MOV, left_reg, right_reg as u16),
+                    line,
+                );
+            }
+
+            let target = self.fs().current_pc();
+            self.patch_jump(skip_jump, target)?;
+
+            left = ExprDesc::Register(left_reg);
+        }
+
+        // Handle 'or' operator
+        while self.lexer.match_token(&TokenKind::Or)? {
+            let left_reg = self.expr_to_register(left)?;
+            let line = self.current_line();
+
+            // Short-circuit: if truthy, skip right side
+            self.fs_mut().emit(Instruction::ad(Opcode::ISF, 0, left_reg as u16), line);
+            let skip_jump = self.fs_mut().emit(Instruction::adj(Opcode::JMP, 0, 0), line);
+
+            let right = self.parse_and_expr()?;
+            let right_reg = self.expr_to_register(right)?;
+
+            if right_reg != left_reg {
+                self.fs_mut().emit(
+                    Instruction::ad(Opcode::MOV, left_reg, right_reg as u16),
+                    line,
+                );
+            }
+
+            let target = self.fs().current_pc();
+            self.patch_jump(skip_jump, target)?;
+
+            left = ExprDesc::Register(left_reg);
+        }
+
         Ok(left)
     }
 
