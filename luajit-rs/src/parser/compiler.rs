@@ -1201,8 +1201,11 @@ impl<'a> Compiler<'a> {
                 let mut count = 0u8;
                 if !self.lexer.check(&TokenKind::RParen)? {
                     loop {
+                        // Save target register BEFORE parsing, since parsing
+                        // the argument expression may allocate registers
+                        let target = self.fs().free_reg;
                         let arg = self.parse_expression()?;
-                        self.expr_to_next_reg(arg)?;
+                        self.expr_to_reg(arg, target)?;
                         count += 1;
                         if !self.lexer.match_token(&TokenKind::Comma)? {
                             break;
