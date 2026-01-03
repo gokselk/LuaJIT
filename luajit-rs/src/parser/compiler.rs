@@ -1457,26 +1457,29 @@ impl<'a> Compiler<'a> {
             TokenKind::Not => {
                 self.lexer.next()?;
                 let expr = self.parse_unary_expr()?;
-                let reg = self.expr_to_register(expr)?;
+                let src_reg = self.expr_to_register(expr)?;
+                let result_reg = self.fs_mut().reserve_reg();
                 let line = self.current_line();
-                self.fs_mut().emit(Instruction::ad(Opcode::NOT, reg, reg as u16), line);
-                Ok(ExprDesc::Register(reg))
+                self.fs_mut().emit(Instruction::ad(Opcode::NOT, result_reg, src_reg as u16), line);
+                Ok(ExprDesc::Register(result_reg))
             }
             TokenKind::Minus => {
                 self.lexer.next()?;
                 let expr = self.parse_unary_expr()?;
-                let reg = self.expr_to_register(expr)?;
+                let src_reg = self.expr_to_register(expr)?;
+                let result_reg = self.fs_mut().reserve_reg();
                 let line = self.current_line();
-                self.fs_mut().emit(Instruction::ad(Opcode::UNM, reg, reg as u16), line);
-                Ok(ExprDesc::Register(reg))
+                self.fs_mut().emit(Instruction::ad(Opcode::UNM, result_reg, src_reg as u16), line);
+                Ok(ExprDesc::Register(result_reg))
             }
             TokenKind::Hash => {
                 self.lexer.next()?;
                 let expr = self.parse_unary_expr()?;
-                let reg = self.expr_to_register(expr)?;
+                let src_reg = self.expr_to_register(expr)?;
+                let result_reg = self.fs_mut().reserve_reg();
                 let line = self.current_line();
-                self.fs_mut().emit(Instruction::ad(Opcode::LEN, reg, reg as u16), line);
-                Ok(ExprDesc::Register(reg))
+                self.fs_mut().emit(Instruction::ad(Opcode::LEN, result_reg, src_reg as u16), line);
+                Ok(ExprDesc::Register(result_reg))
             }
             _ => self.parse_pow_expr(),
         }
