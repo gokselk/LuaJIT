@@ -603,12 +603,18 @@ impl<'a> Interpreter<'a> {
                 // Loop operations
                 Opcode::FORI => {
                     // For loop init: base+a = idx, base+a+1 = limit, base+a+2 = step
-                    let idx = self.state.stack.get(base + a).as_number();
-                    let limit = self.state.stack.get(base + a + 1).as_number();
-                    let step = self.state.stack.get(base + a + 2).as_number();
+                    // Use coerce_to_number to handle string-to-number conversion
+                    let idx = self.state.stack.get(base + a).coerce_to_number();
+                    let limit = self.state.stack.get(base + a + 1).coerce_to_number();
+                    let step = self.state.stack.get(base + a + 2).coerce_to_number();
 
                     match (idx, limit, step) {
                         (Some(i), Some(l), Some(s)) => {
+                            // Store converted numbers back to stack for FORL
+                            self.state.stack.set(base + a, Value::number(i));
+                            self.state.stack.set(base + a + 1, Value::number(l));
+                            self.state.stack.set(base + a + 2, Value::number(s));
+
                             // Copy to loop variable
                             self.state.stack.set(base + a + 3, Value::number(i));
 
@@ -760,7 +766,8 @@ impl<'a> Interpreter<'a> {
                             for uv_desc in &child_proto.upvalues {
                                 let upvalue = if uv_desc.in_stack {
                                     // Capture from current stack frame
-                                    let slot_ptr = self.state.stack.slot_ptr(base + uv_desc.index as usize);
+                                    let abs_slot = base + uv_desc.index as usize;
+                                    let slot_ptr = self.state.stack.slot_ptr(abs_slot);
                                     let uv = Upvalue::new_open(slot_ptr);
                                     self.state.gc.alloc(uv)
                                 } else {
@@ -770,7 +777,6 @@ impl<'a> Interpreter<'a> {
                                         if let Some(uv) = parent.upvalues.get(uv_desc.index as usize) {
                                             *uv
                                         } else {
-                                            // Fallback: create a nil upvalue
                                             self.state.gc.alloc(Upvalue::new_closed(Value::nil()))
                                         }
                                     }

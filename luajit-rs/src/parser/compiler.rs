@@ -433,24 +433,29 @@ impl<'a> Compiler<'a> {
 
         let base = self.fs().free_reg;
 
-        // Parse init, limit, step
+        // Parse init, limit, step - must be in consecutive registers starting at base
+        // Reset free_reg to base to ensure proper placement
         let init = self.parse_expression()?;
-        let init_reg = self.expr_to_next_reg(init)?;
+        self.fs_mut().free_reg = base;
+        self.expr_to_reg(init, base)?;
+        self.fs_mut().free_reg = base + 1;
 
         self.lexer.expect(TokenKind::Comma)?;
         let limit = self.parse_expression()?;
-        let _limit_reg = self.expr_to_next_reg(limit)?;
+        self.fs_mut().free_reg = base + 1;
+        self.expr_to_reg(limit, base + 1)?;
+        self.fs_mut().free_reg = base + 2;
 
-        let step = if self.lexer.match_token(&TokenKind::Comma)? {
+        if self.lexer.match_token(&TokenKind::Comma)? {
             let s = self.parse_expression()?;
-            self.expr_to_next_reg(s)?
+            self.fs_mut().free_reg = base + 2;
+            self.expr_to_reg(s, base + 2)?;
         } else {
             // Default step = 1
             let line = self.current_line();
-            let reg = self.fs_mut().reserve_reg();
-            self.fs_mut().emit(Instruction::ad(Opcode::KSHORT, reg, 1), line);
-            reg
-        };
+            self.fs_mut().emit(Instruction::ad(Opcode::KSHORT, base + 2, 1), line);
+        }
+        self.fs_mut().free_reg = base + 3;
 
         // Reserve slot for loop variable
         let loop_var = self.fs_mut().reserve_reg();

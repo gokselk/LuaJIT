@@ -1,35 +1,97 @@
 //! NaN-boxing implementation for Lua values.
 //!
-//! This implements efficient value representation using NaN-boxing, where
-//! non-number values are encoded as NaN bit patterns with type tags.
+//! This implements efficient value representation using NaN-boxing, following
+//! LuaJIT's approach. Non-number values are encoded as NaN bit patterns with
+//! type tags in the upper bits.
 //!
 //! Layout (64-bit):
-//! - Numbers: IEEE 754 double-precision float (NaN excluded for tagging)
-//! - Other types: 0xFFF8_XXXX_PPPP_PPPP where XXXX is the type tag and P is payload
+//! - Numbers: IEEE 754 double-precision float (raw bits, no transformation)
+//! - Tagged values: upper 16 bits > 0xFFF8, lower 48 bits are payload
+//!
+//! IEEE 754 floats have upper 16 bits at most 0xFFF8 (negative quiet NaN).
+//! Any value with upper 16 bits >= 0xFFF9 is a tagged non-number value.
 
 use super::{LuaType, LuaError, LuaResult, GcRef, Table, LuaString, Function, Userdata};
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use ordered_float::OrderedFloat;
 
-/// Tag bits for NaN-boxing (upper 16 bits of NaN pattern)
-const NAN_TAG_MASK: u64 = 0xFFFF_0000_0000_0000;
+// ==================== Type Tags ====================
+//
+// Following LuaJIT's ordering (lj_obj.h):
+// - Primitives (nil/false/true) have highest itypes
+// - GC objects have lower itypes
+// - Numbers have itype <= TAG_NUMBER_MAX
+//
+// We use upper 16 bits for type discrimination.
+// All IEEE 754 floats have upper 16 bits <= 0xFFF8.
+// Tags 0xFFF9-0xFFFF are safe for non-number values.
+
+/// Maximum upper 16 bits for any IEEE 754 float (negative quiet NaN)
+const TAG_NUMBER_MAX: u16 = 0xFFF8;
+
+/// Type tag for nil (highest value, like LuaJIT's ~0u)
+const TAG_NIL: u16 = 0xFFFF;
+
+/// Type tag for false (like LuaJIT's ~1u)
+const TAG_FALSE: u16 = 0xFFFE;
+
+/// Type tag for true (like LuaJIT's ~2u)
+const TAG_TRUE: u16 = 0xFFFD;
+
+/// Type tag for light userdata (like LuaJIT's ~3u)
+const TAG_LIGHTUD: u16 = 0xFFFC;
+
+/// Type tag for strings (like LuaJIT's ~4u)
+const TAG_STRING: u16 = 0xFFFB;
+
+/// Type tag for tables (like LuaJIT's ~11u, but we compress into available range)
+const TAG_TABLE: u16 = 0xFFFA;
+
+/// Type tag for functions (like LuaJIT's ~8u)
+const TAG_FUNCTION: u16 = 0xFFF9;
+
+// For userdata/thread, we use TAG_FUNCTION with a marker bit in the payload
+// Bit 47 (0x0000_8000_0000_0000) distinguishes:
+// - Bit 47 = 0: Function
+// - Bit 47 = 1: Other (userdata or thread, distinguished by bit 46)
+
+/// Marker bit for "other" types (userdata, thread) in payload
+const PAYLOAD_OTHER_BIT: u64 = 0x0000_8000_0000_0000;
+/// Marker bit for thread (when OTHER_BIT is set)
+const PAYLOAD_THREAD_BIT: u64 = 0x0000_4000_0000_0000;
+
+/// Mask for 46-bit pointer payload (when using marker bits)
+const PAYLOAD_MASK_46: u64 = 0x0000_3FFF_FFFF_FFFF;
+
+/// Mask for 48-bit pointer payload
 const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
-/// Quiet NaN with tag space (using 0x7FF0 to leave room for 4-bit tags)
-const QNAN_BASE: u64 = 0x7FF0_0000_0000_0000;
+// ==================== Helper Functions ====================
 
-/// Type tags (added to QNAN_BASE) - must not overlap with QNAN_BASE lower nibble
-const TAG_NIL: u64      = 0x0001_0000_0000_0000;
-const TAG_FALSE: u64    = 0x0002_0000_0000_0000;
-const TAG_TRUE: u64     = 0x0003_0000_0000_0000;
-const TAG_LIGHTUD: u64  = 0x0004_0000_0000_0000;
-const TAG_STRING: u64   = 0x0005_0000_0000_0000;
-const TAG_TABLE: u64    = 0x0006_0000_0000_0000;
-const TAG_FUNCTION: u64 = 0x0007_0000_0000_0000;
-const TAG_USERDATA: u64 = 0x0008_0000_0000_0000;
-const TAG_THREAD: u64   = 0x0009_0000_0000_0000;
-const TAG_INTEGER: u64  = 0x000A_0000_0000_0000;
+/// Extract the type tag (upper 16 bits)
+#[inline]
+const fn get_tag(bits: u64) -> u16 {
+    (bits >> 48) as u16
+}
+
+/// Make a tagged value from tag and 48-bit payload
+#[inline]
+const fn make_tagged(tag: u16, payload: u64) -> u64 {
+    ((tag as u64) << 48) | (payload & PAYLOAD_MASK)
+}
+
+/// Check if bits represent a number (tag <= TAG_NUMBER_MAX)
+#[inline]
+const fn is_number_bits(bits: u64) -> bool {
+    get_tag(bits) <= TAG_NUMBER_MAX
+}
+
+/// Check if bits represent a tagged value (tag > TAG_NUMBER_MAX)
+#[inline]
+const fn is_tagged_bits(bits: u64) -> bool {
+    get_tag(bits) > TAG_NUMBER_MAX
+}
 
 /// A Lua value using NaN-boxing representation.
 #[derive(Clone, Copy)]
@@ -44,36 +106,34 @@ impl Value {
     /// Create a nil value
     #[inline]
     pub const fn nil() -> Self {
-        Self { bits: QNAN_BASE | TAG_NIL }
+        Self { bits: make_tagged(TAG_NIL, 0) }
     }
 
     /// Create a boolean value
     #[inline]
     pub const fn boolean(b: bool) -> Self {
         Self {
-            bits: QNAN_BASE | if b { TAG_TRUE } else { TAG_FALSE },
+            bits: make_tagged(if b { TAG_TRUE } else { TAG_FALSE }, 0),
         }
     }
 
-    /// Create a number value
+    /// Create a number value (stored as raw IEEE 754 bits)
     #[inline]
     pub fn number(n: f64) -> Self {
         Self { bits: n.to_bits() }
     }
 
-    /// Create an integer value
+    /// Create an integer value (stored as a float)
     #[inline]
     pub fn integer(i: i32) -> Self {
-        Self {
-            bits: QNAN_BASE | TAG_INTEGER | (i as u32 as u64),
-        }
+        Self::number(i as f64)
     }
 
     /// Create a string value from a GC reference
     #[inline]
     pub fn string(s: GcRef<LuaString>) -> Self {
         Self {
-            bits: QNAN_BASE | TAG_STRING | (s.as_ptr() as u64 & PAYLOAD_MASK),
+            bits: make_tagged(TAG_STRING, s.as_ptr() as u64),
         }
     }
 
@@ -81,7 +141,7 @@ impl Value {
     #[inline]
     pub fn table(t: GcRef<Table>) -> Self {
         Self {
-            bits: QNAN_BASE | TAG_TABLE | (t.as_ptr() as u64 & PAYLOAD_MASK),
+            bits: make_tagged(TAG_TABLE, t.as_ptr() as u64),
         }
     }
 
@@ -89,15 +149,17 @@ impl Value {
     #[inline]
     pub fn function(f: GcRef<Function>) -> Self {
         Self {
-            bits: QNAN_BASE | TAG_FUNCTION | (f.as_ptr() as u64 & PAYLOAD_MASK),
+            bits: make_tagged(TAG_FUNCTION, f.as_ptr() as u64),
         }
     }
 
     /// Create a userdata value from a GC reference
     #[inline]
     pub fn userdata(u: GcRef<Userdata>) -> Self {
+        // Use TAG_FUNCTION with PAYLOAD_OTHER_BIT set, PAYLOAD_THREAD_BIT clear
+        let ptr = u.as_ptr() as u64 & PAYLOAD_MASK_46;
         Self {
-            bits: QNAN_BASE | TAG_USERDATA | (u.as_ptr() as u64 & PAYLOAD_MASK),
+            bits: make_tagged(TAG_FUNCTION, PAYLOAD_OTHER_BIT | ptr),
         }
     }
 
@@ -105,73 +167,85 @@ impl Value {
     #[inline]
     pub fn light_userdata(ptr: *mut ()) -> Self {
         Self {
-            bits: QNAN_BASE | TAG_LIGHTUD | (ptr as u64 & PAYLOAD_MASK),
+            bits: make_tagged(TAG_LIGHTUD, ptr as u64),
         }
     }
 
     // ==================== Type Checking ====================
 
-    /// Check if value is a number (float or integer)
+    /// Check if value is a number
     #[inline]
     pub fn is_number(&self) -> bool {
-        self.is_float() || self.is_integer()
+        is_number_bits(self.bits)
     }
 
-    /// Check if value is a float
+    /// Check if value is a float (same as is_number)
     #[inline]
     pub fn is_float(&self) -> bool {
-        // A value is a float if it's NOT a tagged value
-        // (not a quiet NaN with our tag pattern)
-        (self.bits & QNAN_BASE) != QNAN_BASE
+        self.is_number()
     }
 
-    /// Check if value is an integer
+    /// Check if value is an integer (float that's a whole number)
     #[inline]
     pub fn is_integer(&self) -> bool {
-        (self.bits & (QNAN_BASE | 0xFFFF_0000_0000_0000)) == (QNAN_BASE | TAG_INTEGER)
+        if !self.is_number() {
+            return false;
+        }
+        let n = f64::from_bits(self.bits);
+        n.is_finite() && n == (n as i32 as f64)
     }
 
     /// Check if value is nil
     #[inline]
     pub fn is_nil(&self) -> bool {
-        self.bits == (QNAN_BASE | TAG_NIL)
+        get_tag(self.bits) == TAG_NIL
     }
 
     /// Check if value is a boolean
     #[inline]
     pub fn is_boolean(&self) -> bool {
-        let tag = self.bits & !1; // Ignore the true/false bit
-        tag == (QNAN_BASE | TAG_FALSE)
+        let tag = get_tag(self.bits);
+        tag == TAG_FALSE || tag == TAG_TRUE
     }
 
     /// Check if value is a string
     #[inline]
     pub fn is_string(&self) -> bool {
-        (self.bits & (QNAN_BASE | 0xFFFF_0000_0000_0000)) == (QNAN_BASE | TAG_STRING)
+        get_tag(self.bits) == TAG_STRING
     }
 
     /// Check if value is a table
     #[inline]
     pub fn is_table(&self) -> bool {
-        (self.bits & (QNAN_BASE | 0xFFFF_0000_0000_0000)) == (QNAN_BASE | TAG_TABLE)
+        get_tag(self.bits) == TAG_TABLE
     }
 
     /// Check if value is a function
     #[inline]
     pub fn is_function(&self) -> bool {
-        (self.bits & (QNAN_BASE | 0xFFFF_0000_0000_0000)) == (QNAN_BASE | TAG_FUNCTION)
+        get_tag(self.bits) == TAG_FUNCTION && (self.bits & PAYLOAD_OTHER_BIT) == 0
     }
 
     /// Check if value is userdata
     #[inline]
     pub fn is_userdata(&self) -> bool {
-        (self.bits & (QNAN_BASE | 0xFFFF_0000_0000_0000)) == (QNAN_BASE | TAG_USERDATA)
+        get_tag(self.bits) == TAG_FUNCTION
+            && (self.bits & PAYLOAD_OTHER_BIT) != 0
+            && (self.bits & PAYLOAD_THREAD_BIT) == 0
+    }
+
+    /// Check if value is a thread
+    #[inline]
+    pub fn is_thread(&self) -> bool {
+        get_tag(self.bits) == TAG_FUNCTION
+            && (self.bits & PAYLOAD_OTHER_BIT) != 0
+            && (self.bits & PAYLOAD_THREAD_BIT) != 0
     }
 
     /// Check if value is light userdata
     #[inline]
     pub fn is_light_userdata(&self) -> bool {
-        (self.bits & (QNAN_BASE | 0xFFFF_0000_0000_0000)) == (QNAN_BASE | TAG_LIGHTUD)
+        get_tag(self.bits) == TAG_LIGHTUD
     }
 
     // ==================== Value Extraction ====================
@@ -179,68 +253,96 @@ impl Value {
     /// Get the Lua type of this value
     #[inline]
     pub fn lua_type(&self) -> LuaType {
-        if self.is_float() {
+        let tag = get_tag(self.bits);
+
+        // Numbers have tag <= TAG_NUMBER_MAX
+        if tag <= TAG_NUMBER_MAX {
             return LuaType::Number;
         }
 
-        // Check tagged value type by matching the full tag pattern
-        let tag = (self.bits >> 48) & 0xFFFF;
-        const QNAN_UPPER: u64 = (QNAN_BASE >> 48);
-
         match tag {
-            x if x == QNAN_UPPER | 0x0001 => LuaType::Nil,
-            x if x == QNAN_UPPER | 0x0002 => LuaType::Boolean, // false
-            x if x == QNAN_UPPER | 0x0003 => LuaType::Boolean, // true
-            x if x == QNAN_UPPER | 0x0004 => LuaType::LightUserdata,
-            x if x == QNAN_UPPER | 0x0005 => LuaType::String,
-            x if x == QNAN_UPPER | 0x0006 => LuaType::Table,
-            x if x == QNAN_UPPER | 0x0007 => LuaType::Function,
-            x if x == QNAN_UPPER | 0x0008 => LuaType::Userdata,
-            x if x == QNAN_UPPER | 0x0009 => LuaType::Thread,
-            x if x == QNAN_UPPER | 0x000A => LuaType::Number, // Integer
-            _ => LuaType::Nil,
+            TAG_NIL => LuaType::Nil,
+            TAG_FALSE | TAG_TRUE => LuaType::Boolean,
+            TAG_LIGHTUD => LuaType::LightUserdata,
+            TAG_STRING => LuaType::String,
+            TAG_TABLE => LuaType::Table,
+            TAG_FUNCTION => {
+                // Check marker bits for function vs userdata vs thread
+                if (self.bits & PAYLOAD_OTHER_BIT) == 0 {
+                    LuaType::Function
+                } else if (self.bits & PAYLOAD_THREAD_BIT) == 0 {
+                    LuaType::Userdata
+                } else {
+                    LuaType::Thread
+                }
+            }
+            _ => LuaType::Nil, // Shouldn't happen
         }
     }
 
     /// Get as a number (float or integer converted to float)
     #[inline]
     pub fn as_number(&self) -> Option<f64> {
-        if self.is_float() {
+        if self.is_number() {
             Some(f64::from_bits(self.bits))
-        } else if self.is_integer() {
-            Some((self.bits as u32 as i32) as f64)
         } else {
             None
         }
+    }
+
+    /// Coerce value to number (including string-to-number conversion)
+    /// This is used for arithmetic operations and for loops in Lua
+    pub fn coerce_to_number(&self) -> Option<f64> {
+        // First try direct number conversion
+        if let Some(n) = self.as_number() {
+            return Some(n);
+        }
+
+        // Try string-to-number conversion
+        if let Some(s) = self.as_string() {
+            let s = unsafe { &*s.as_ptr() };
+            if let Some(text) = s.as_str() {
+                let text = text.trim();
+
+                // Handle hex numbers
+                if text.starts_with("0x") || text.starts_with("0X") {
+                    if let Ok(n) = i64::from_str_radix(&text[2..], 16) {
+                        return Some(n as f64);
+                    }
+                }
+
+                // Parse as float
+                if let Ok(n) = text.parse::<f64>() {
+                    return Some(n);
+                }
+            }
+        }
+
+        None
     }
 
     /// Get as an integer
     #[inline]
     pub fn as_integer(&self) -> Option<i32> {
-        if self.is_integer() {
-            Some(self.bits as u32 as i32)
-        } else if self.is_float() {
+        if self.is_number() {
             let n = f64::from_bits(self.bits);
-            let i = n as i32;
-            if (i as f64) == n {
-                Some(i)
-            } else {
-                None
+            if n.is_finite() {
+                let i = n as i32;
+                if (i as f64) == n {
+                    return Some(i);
+                }
             }
-        } else {
-            None
         }
+        None
     }
 
     /// Get as a boolean
     #[inline]
     pub fn as_boolean(&self) -> Option<bool> {
-        if self.bits == (QNAN_BASE | TAG_TRUE) {
-            Some(true)
-        } else if self.bits == (QNAN_BASE | TAG_FALSE) {
-            Some(false)
-        } else {
-            None
+        match get_tag(self.bits) {
+            TAG_TRUE => Some(true),
+            TAG_FALSE => Some(false),
+            _ => None,
         }
     }
 
@@ -248,6 +350,12 @@ impl Value {
     #[inline]
     fn get_pointer<T>(&self) -> *mut T {
         (self.bits & PAYLOAD_MASK) as *mut T
+    }
+
+    /// Get pointer payload with 46-bit mask (for userdata/thread)
+    #[inline]
+    fn get_pointer_46<T>(&self) -> *mut T {
+        (self.bits & PAYLOAD_MASK_46) as *mut T
     }
 
     /// Get as a string reference
@@ -284,7 +392,7 @@ impl Value {
     #[inline]
     pub fn as_userdata(&self) -> Option<GcRef<Userdata>> {
         if self.is_userdata() {
-            Some(GcRef::new(self.get_pointer()))
+            Some(GcRef::new(self.get_pointer_46()))
         } else {
             None
         }
@@ -303,15 +411,19 @@ impl Value {
     // ==================== Truthiness ====================
 
     /// Check if value is truthy (not nil and not false)
+    /// Following LuaJIT: anything except nil and false is truthy
     #[inline]
     pub fn is_truthy(&self) -> bool {
-        !self.is_nil() && self.bits != (QNAN_BASE | TAG_FALSE)
+        let tag = get_tag(self.bits);
+        // Everything is truthy except nil (0xFFFF) and false (0xFFFE)
+        tag < TAG_FALSE
     }
 
     /// Check if value is falsy (nil or false)
     #[inline]
     pub fn is_falsy(&self) -> bool {
-        self.is_nil() || self.bits == (QNAN_BASE | TAG_FALSE)
+        let tag = get_tag(self.bits);
+        tag >= TAG_FALSE  // nil (0xFFFF) and false (0xFFFE)
     }
 
     // ==================== Arithmetic Operations ====================
@@ -458,14 +570,9 @@ impl Value {
         }
 
         // Handle NaN: NaN != NaN
-        if self.is_float() && other.is_float() {
+        if self.is_number() && other.is_number() {
             let a = f64::from_bits(self.bits);
             let b = f64::from_bits(other.bits);
-            return a == b;
-        }
-
-        // Handle integer vs float comparison
-        if let (Some(a), Some(b)) = (self.as_number(), other.as_number()) {
             return a == b;
         }
 
@@ -529,9 +636,9 @@ impl fmt::Debug for Value {
             LuaType::String => write!(f, "string: {:p}", self.get_pointer::<LuaString>()),
             LuaType::Table => write!(f, "table: {:p}", self.get_pointer::<Table>()),
             LuaType::Function => write!(f, "function: {:p}", self.get_pointer::<Function>()),
-            LuaType::Userdata => write!(f, "userdata: {:p}", self.get_pointer::<Userdata>()),
+            LuaType::Userdata => write!(f, "userdata: {:p}", self.get_pointer_46::<Userdata>()),
             LuaType::LightUserdata => write!(f, "userdata: {:p}", self.get_pointer::<()>()),
-            LuaType::Thread => write!(f, "thread: {:p}", self.get_pointer::<()>()),
+            LuaType::Thread => write!(f, "thread: {:p}", self.get_pointer_46::<()>()),
             _ => write!(f, "unknown"),
         }
     }
@@ -652,6 +759,26 @@ mod tests {
     }
 
     #[test]
+    fn test_special_floats() {
+        // Infinity should be a number
+        let inf = Value::number(f64::INFINITY);
+        assert!(inf.is_number());
+        assert_eq!(inf.lua_type(), LuaType::Number);
+        assert_eq!(inf.as_number(), Some(f64::INFINITY));
+
+        let neg_inf = Value::number(f64::NEG_INFINITY);
+        assert!(neg_inf.is_number());
+        assert_eq!(neg_inf.lua_type(), LuaType::Number);
+        assert_eq!(neg_inf.as_number(), Some(f64::NEG_INFINITY));
+
+        // NaN should be a number
+        let nan = Value::number(f64::NAN);
+        assert!(nan.is_number());
+        assert_eq!(nan.lua_type(), LuaType::Number);
+        assert!(nan.as_number().unwrap().is_nan());
+    }
+
+    #[test]
     fn test_arithmetic() {
         let a = Value::number(10.0);
         let b = Value::number(3.0);
@@ -664,6 +791,17 @@ mod tests {
     }
 
     #[test]
+    fn test_division_by_zero() {
+        let one = Value::number(1.0);
+        let zero = Value::number(0.0);
+
+        // Division by zero should produce infinity, not nil
+        let result = one.div(&zero).unwrap();
+        assert!(result.is_number());
+        assert_eq!(result.as_number(), Some(f64::INFINITY));
+    }
+
+    #[test]
     fn test_equality() {
         let a = Value::number(42.0);
         let b = Value::integer(42);
@@ -672,5 +810,18 @@ mod tests {
         let nil1 = Value::nil();
         let nil2 = Value::nil();
         assert!(nil1.raw_eq(&nil2));
+    }
+
+    #[test]
+    fn test_truthiness() {
+        // Numbers are truthy
+        assert!(Value::number(0.0).is_truthy());
+        assert!(Value::number(1.0).is_truthy());
+        assert!(Value::number(f64::INFINITY).is_truthy());
+
+        // Only nil and false are falsy
+        assert!(Value::nil().is_falsy());
+        assert!(Value::boolean(false).is_falsy());
+        assert!(Value::boolean(true).is_truthy());
     }
 }
