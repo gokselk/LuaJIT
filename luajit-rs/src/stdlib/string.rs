@@ -61,7 +61,7 @@ fn string_byte(state: &mut State) -> LuaResult<usize> {
 
 fn string_char(state: &mut State) -> LuaResult<usize> {
     let n = state.get_top();
-    let mut result = String::with_capacity(n);
+    let mut result: Vec<u8> = Vec::with_capacity(n);
 
     for i in 1..=n as i32 {
         let c = state.to_integer(i).ok_or_else(|| LuaError::ArgumentError {
@@ -76,10 +76,10 @@ fn string_char(state: &mut State) -> LuaResult<usize> {
                 msg: "value out of range".to_string(),
             });
         }
-        result.push(c as u8 as char);
+        result.push(c as u8);
     }
 
-    let val = state.intern_string(&result);
+    let val = state.intern_bytes(&result);
     state.push(val)?;
     Ok(1)
 }
@@ -100,15 +100,21 @@ fn string_len(state: &mut State) -> LuaResult<usize> {
 }
 
 fn string_lower(state: &mut State) -> LuaResult<usize> {
-    let s = state.get_value(1);
-    if let Some(str_ref) = s.as_string() {
-        let str_val = unsafe { &*str_ref.as_ptr() };
-        if let Some(s) = str_val.as_str() {
-            let result = s.to_lowercase();
-            let val = state.intern_string(&result);
-            state.push(val)?;
-            return Ok(1);
-        }
+    let v = state.get_value(1);
+    if let Some(str_ref) = v.as_string() {
+        let lua_str = unsafe { &*str_ref.as_ptr() };
+        // Convert to lowercase byte by byte (ASCII only, non-ASCII bytes unchanged)
+        let result: Vec<u8> = lua_str.as_bytes().iter().map(|&b| b.to_ascii_lowercase()).collect();
+        let val = state.intern_bytes(&result);
+        state.push(val)?;
+        return Ok(1);
+    }
+    // Try number-to-string coercion
+    if let Some(s) = state.to_lua_string(1) {
+        let result: Vec<u8> = s.bytes().map(|b| b.to_ascii_lowercase()).collect();
+        let val = state.intern_bytes(&result);
+        state.push(val)?;
+        return Ok(1);
     }
     Err(LuaError::ArgumentError {
         func: "string.lower".to_string(),
@@ -118,15 +124,21 @@ fn string_lower(state: &mut State) -> LuaResult<usize> {
 }
 
 fn string_upper(state: &mut State) -> LuaResult<usize> {
-    let s = state.get_value(1);
-    if let Some(str_ref) = s.as_string() {
-        let str_val = unsafe { &*str_ref.as_ptr() };
-        if let Some(s) = str_val.as_str() {
-            let result = s.to_uppercase();
-            let val = state.intern_string(&result);
-            state.push(val)?;
-            return Ok(1);
-        }
+    let v = state.get_value(1);
+    if let Some(str_ref) = v.as_string() {
+        let lua_str = unsafe { &*str_ref.as_ptr() };
+        // Convert to uppercase byte by byte (ASCII only, non-ASCII bytes unchanged)
+        let result: Vec<u8> = lua_str.as_bytes().iter().map(|&b| b.to_ascii_uppercase()).collect();
+        let val = state.intern_bytes(&result);
+        state.push(val)?;
+        return Ok(1);
+    }
+    // Try number-to-string coercion
+    if let Some(s) = state.to_lua_string(1) {
+        let result: Vec<u8> = s.bytes().map(|b| b.to_ascii_uppercase()).collect();
+        let val = state.intern_bytes(&result);
+        state.push(val)?;
+        return Ok(1);
     }
     Err(LuaError::ArgumentError {
         func: "string.upper".to_string(),
@@ -136,35 +148,82 @@ fn string_upper(state: &mut State) -> LuaResult<usize> {
 }
 
 fn string_rep(state: &mut State) -> LuaResult<usize> {
-    let s = state.get_value(1);
+    // Get string bytes (either raw string or coerced number)
+    let v = state.get_value(1);
+    let bytes: Vec<u8> = if let Some(str_ref) = v.as_string() {
+        let lua_str = unsafe { &*str_ref.as_ptr() };
+        lua_str.as_bytes().to_vec()
+    } else if let Some(s) = state.to_lua_string(1) {
+        s.into_bytes()
+    } else {
+        return Err(LuaError::ArgumentError {
+            func: "string.rep".to_string(),
+            arg: 1,
+            msg: "string expected".to_string(),
+        });
+    };
+
     let n = state.to_integer(2).unwrap_or(0);
 
-    if let Some(str_ref) = s.as_string() {
-        let str_val = unsafe { &*str_ref.as_ptr() };
-        if let Some(s) = str_val.as_str() {
-            let result = s.repeat(n.max(0) as usize);
-            let val = state.intern_string(&result);
-            state.push(val)?;
-            return Ok(1);
-        }
+    if n <= 0 {
+        let val = state.intern_bytes(&[]);
+        state.push(val)?;
+        return Ok(1);
     }
-    Err(LuaError::ArgumentError {
-        func: "string.rep".to_string(),
-        arg: 1,
-        msg: "string expected".to_string(),
-    })
+
+    // Get separator bytes
+    let sep_v = state.get_value(3);
+    let sep_bytes: Option<Vec<u8>> = if let Some(str_ref) = sep_v.as_string() {
+        let lua_str = unsafe { &*str_ref.as_ptr() };
+        Some(lua_str.as_bytes().to_vec())
+    } else if let Some(s) = state.to_lua_string(3) {
+        Some(s.into_bytes())
+    } else if !sep_v.is_nil() {
+        return Err(LuaError::ArgumentError {
+            func: "string.rep".to_string(),
+            arg: 3,
+            msg: "string expected".to_string(),
+        });
+    } else {
+        None
+    };
+
+    let result = if let Some(sep) = sep_bytes {
+        // With separator: repeat with separator between copies
+        let mut result = Vec::with_capacity(bytes.len() * n as usize + sep.len() * (n as usize - 1));
+        for i in 0..n {
+            if i > 0 {
+                result.extend_from_slice(&sep);
+            }
+            result.extend_from_slice(&bytes);
+        }
+        result
+    } else {
+        // No separator: simple repeat
+        bytes.repeat(n as usize)
+    };
+
+    let val = state.intern_bytes(&result);
+    state.push(val)?;
+    Ok(1)
 }
 
 fn string_reverse(state: &mut State) -> LuaResult<usize> {
-    let s = state.get_value(1);
-    if let Some(str_ref) = s.as_string() {
-        let str_val = unsafe { &*str_ref.as_ptr() };
-        if let Some(s) = str_val.as_str() {
-            let result: String = s.chars().rev().collect();
-            let val = state.intern_string(&result);
-            state.push(val)?;
-            return Ok(1);
-        }
+    let v = state.get_value(1);
+    if let Some(str_ref) = v.as_string() {
+        let lua_str = unsafe { &*str_ref.as_ptr() };
+        let bytes = lua_str.as_bytes();
+        let mut reversed: Vec<u8> = bytes.iter().copied().rev().collect();
+        let val = state.intern_bytes(&reversed);
+        state.push(val)?;
+        return Ok(1);
+    }
+    // Try number-to-string coercion
+    if let Some(s) = state.to_lua_string(1) {
+        let reversed: Vec<u8> = s.bytes().rev().collect();
+        let val = state.intern_bytes(&reversed);
+        state.push(val)?;
+        return Ok(1);
     }
     Err(LuaError::ArgumentError {
         func: "string.reverse".to_string(),

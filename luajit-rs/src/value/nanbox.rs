@@ -336,6 +336,19 @@ impl Value {
         None
     }
 
+    /// Coerce value to integer (including string-to-number conversion)
+    pub fn coerce_to_integer(&self) -> Option<i32> {
+        if let Some(n) = self.coerce_to_number() {
+            if n.is_finite() {
+                let i = n as i32;
+                if (i as f64) == n {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
     /// Get as a boolean
     #[inline]
     pub fn as_boolean(&self) -> Option<bool> {

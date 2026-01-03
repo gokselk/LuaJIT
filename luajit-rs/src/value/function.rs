@@ -18,7 +18,7 @@ pub struct Proto {
     /// Constants used by the function
     pub constants: Vec<Value>,
     /// String constants (stored as raw bytes, interned at runtime)
-    pub string_constants: Vec<String>,
+    pub string_constants: Vec<Vec<u8>>,
     /// Nested function prototypes (GC-allocated at load time)
     pub protos: Vec<GcRef<Proto>>,
     /// Child prototypes (compile-time storage, moved to protos at load time)
@@ -95,16 +95,21 @@ impl Proto {
         }
     }
 
-    /// Add a string constant and return its index
+    /// Add a string constant (from UTF-8 str) and return its index
     pub fn add_string_constant(&mut self, s: &str) -> usize {
+        self.add_string_constant_bytes(s.as_bytes())
+    }
+
+    /// Add a string constant (from raw bytes) and return its index
+    pub fn add_string_constant_bytes(&mut self, bytes: &[u8]) -> usize {
         // Check if string already exists
         for (i, existing) in self.string_constants.iter().enumerate() {
-            if existing == s {
+            if existing == bytes {
                 return i;
             }
         }
         let idx = self.string_constants.len();
-        self.string_constants.push(s.to_string());
+        self.string_constants.push(bytes.to_vec());
         idx
     }
 

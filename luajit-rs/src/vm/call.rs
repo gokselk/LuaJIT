@@ -98,10 +98,10 @@ impl CallFrame {
             .unwrap_or(Value::nil())
     }
 
-    /// Get a string constant from the prototype
-    pub fn get_string_constant(&self, index: usize) -> Option<&str> {
+    /// Get a string constant (as bytes) from the prototype
+    pub fn get_string_constant(&self, index: usize) -> Option<&[u8]> {
         self.proto()
-            .and_then(|p| p.string_constants.get(index).map(|s| s.as_str()))
+            .and_then(|p| p.string_constants.get(index).map(|s| s.as_slice()))
     }
 }
 

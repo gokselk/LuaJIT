@@ -484,11 +484,11 @@ impl<'a> Interpreter<'a> {
                     let d = instr.d() as usize;
                     // Get string constant and intern it at runtime
                     let frame = self.state.call_stack.current().unwrap();
-                    let string_val = if let Some(s) = frame.get_string_constant(d) {
+                    let string_val = if let Some(bytes) = frame.get_string_constant(d) {
                         // Need to copy to avoid borrow issues
-                        let s = s.to_string();
+                        let bytes = bytes.to_vec();
                         drop(frame);
-                        self.state.intern_string(&s)
+                        self.state.intern_bytes(&bytes)
                     } else {
                         Value::nil()
                     };
@@ -719,10 +719,10 @@ impl<'a> Interpreter<'a> {
                     let table = self.state.stack.get(base + b);
                     let frame = self.state.call_stack.current().unwrap();
                     // Get string constant and intern it for key
-                    let key = if let Some(s) = frame.get_string_constant(c) {
-                        let s = s.to_string();
+                    let key = if let Some(bytes) = frame.get_string_constant(c) {
+                        let bytes = bytes.to_vec();
                         drop(frame);
-                        self.state.intern_string(&s)
+                        self.state.intern_bytes(&bytes)
                     } else {
                         frame.get_constant(c)
                     };
@@ -774,10 +774,10 @@ impl<'a> Interpreter<'a> {
                     let val = self.state.stack.get(base + b);
                     let frame = self.state.call_stack.current().unwrap();
                     // Get string constant and intern it for key
-                    let key = if let Some(s) = frame.get_string_constant(c) {
-                        let s = s.to_string();
+                    let key = if let Some(bytes) = frame.get_string_constant(c) {
+                        let bytes = bytes.to_vec();
                         drop(frame);
-                        self.state.intern_string(&s)
+                        self.state.intern_bytes(&bytes)
                     } else {
                         frame.get_constant(c)
                     };
@@ -818,10 +818,10 @@ impl<'a> Interpreter<'a> {
                     let d = instr.d() as usize;
                     // Get string constant, intern it, and look up in globals
                     let frame = self.state.call_stack.current().unwrap();
-                    let val = if let Some(s) = frame.get_string_constant(d) {
-                        let s = s.to_string();
+                    let val = if let Some(bytes) = frame.get_string_constant(d) {
+                        let bytes = bytes.to_vec();
                         drop(frame);
-                        let key = self.state.intern_string(&s);
+                        let key = self.state.intern_bytes(&bytes);
                         unsafe { (*self.state.globals.as_ptr()).get(&key) }
                     } else {
                         Value::nil()
@@ -834,10 +834,10 @@ impl<'a> Interpreter<'a> {
                     let val = self.state.stack.get(base + a);
                     // Get string constant and intern it for global key
                     let frame = self.state.call_stack.current().unwrap();
-                    if let Some(s) = frame.get_string_constant(d) {
-                        let s = s.to_string();
+                    if let Some(bytes) = frame.get_string_constant(d) {
+                        let bytes = bytes.to_vec();
                         drop(frame);
-                        let key = self.state.intern_string(&s);
+                        let key = self.state.intern_bytes(&bytes);
                         unsafe { (*self.state.globals.as_ptr()).set(key, val) };
                     }
                 }

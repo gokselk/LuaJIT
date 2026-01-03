@@ -114,6 +114,12 @@ impl FunctionState {
         self.proto.add_string_constant(s)
     }
 
+    fn add_string_constant_bytes(&mut self, bytes: &[u8]) -> usize {
+        // Store raw bytes in proto.string_constants
+        // The interpreter will intern it at runtime
+        self.proto.add_string_constant_bytes(bytes)
+    }
+
     fn current_pc(&self) -> usize {
         self.proto.code.len()
     }
@@ -1717,10 +1723,10 @@ impl<'a> Compiler<'a> {
                 self.expr_to_next_reg(arg)?;
                 1
             }
-            TokenKind::String(s) => {
-                let s = s.clone();
+            TokenKind::String(bytes) => {
+                let bytes = bytes.clone();
                 self.lexer.next()?;
-                let idx = self.fs_mut().add_string_constant(&s);
+                let idx = self.fs_mut().add_string_constant_bytes(&bytes);
                 let reg = self.fs_mut().reserve_reg();
                 self.fs_mut().emit(Instruction::ad(Opcode::KSTR, reg, idx as u16), line);
                 1
@@ -1829,10 +1835,10 @@ impl<'a> Compiler<'a> {
                 self.expr_to_next_reg(arg)?;
                 2 // self + table
             }
-            TokenKind::String(s) => {
-                let s = s.clone();
+            TokenKind::String(bytes) => {
+                let bytes = bytes.clone();
                 self.lexer.next()?;
-                let idx = self.fs_mut().add_string_constant(&s);
+                let idx = self.fs_mut().add_string_constant_bytes(&bytes);
                 let reg = self.fs_mut().reserve_reg();
                 self.fs_mut().emit(Instruction::ad(Opcode::KSTR, reg, idx as u16), line);
                 2 // self + string
@@ -1900,10 +1906,10 @@ impl<'a> Compiler<'a> {
                 self.lexer.next()?;
                 Ok(ExprDesc::Number(n))
             }
-            TokenKind::String(s) => {
-                let s = s.clone();
+            TokenKind::String(bytes) => {
+                let bytes = bytes.clone();
                 self.lexer.next()?;
-                let idx = self.fs_mut().add_string_constant(&s);
+                let idx = self.fs_mut().add_string_constant_bytes(&bytes);
                 Ok(ExprDesc::String(idx))
             }
             TokenKind::DotDotDot => {

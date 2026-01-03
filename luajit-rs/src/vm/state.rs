@@ -114,6 +114,12 @@ impl State {
         Value::string(GcRef::new(ptr))
     }
 
+    /// Intern raw bytes as a Lua string
+    pub fn intern_bytes(&mut self, bytes: &[u8]) -> Value {
+        let ptr = self.strings.intern(bytes);
+        Value::string(GcRef::new(ptr))
+    }
+
     /// Get a global variable
     pub fn get_global(&mut self, name: &str) -> Value {
         let key = self.intern_string(name);
@@ -235,9 +241,30 @@ impl State {
         self.get_value(index).coerce_to_number()
     }
 
-    /// Get value as integer
+    /// Get value as integer (with string coercion)
     pub fn to_integer(&self, index: i32) -> Option<i32> {
-        self.get_value(index).as_integer()
+        self.get_value(index).coerce_to_integer()
+    }
+
+    /// Get value as string (with number-to-string coercion)
+    /// Returns the string content if available
+    pub fn to_lua_string(&mut self, index: i32) -> Option<String> {
+        let val = self.get_value(index);
+        if let Some(s) = val.as_string() {
+            let lua_str = unsafe { &*s.as_ptr() };
+            return lua_str.as_str().map(|s| s.to_string());
+        }
+        // Coerce number to string
+        if let Some(n) = val.as_number() {
+            // Format number as Lua does
+            let i = n as i64;
+            if (i as f64) == n && n.is_finite() {
+                return Some(format!("{}", i));
+            } else {
+                return Some(format!("{}", n));
+            }
+        }
+        None
     }
 
     /// Create a new table

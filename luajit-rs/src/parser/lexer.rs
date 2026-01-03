@@ -11,7 +11,7 @@ use std::iter::Peekable;
 pub enum TokenKind {
     // Literals
     Name(String),
-    String(String),
+    String(Vec<u8>),  // Lua strings are byte arrays
     Number(f64),
 
     // Keywords
@@ -412,9 +412,9 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Read a string literal
-    fn read_string(&mut self, quote: char) -> LuaResult<String> {
-        let mut s = String::new();
+    /// Read a string literal (returns raw bytes)
+    fn read_string(&mut self, quote: char) -> LuaResult<Vec<u8>> {
+        let mut s: Vec<u8> = Vec::new();
 
         loop {
             match self.advance() {
@@ -425,18 +425,18 @@ impl<'a> Lexer<'a> {
                 }
                 Some(c) if c == quote => break,
                 Some('\\') => {
-                    let escaped = match self.advance() {
-                        Some('a') => '\x07',
-                        Some('b') => '\x08',
-                        Some('f') => '\x0c',
-                        Some('n') => '\n',
-                        Some('r') => '\r',
-                        Some('t') => '\t',
-                        Some('v') => '\x0b',
-                        Some('\\') => '\\',
-                        Some('"') => '"',
-                        Some('\'') => '\'',
-                        Some('\n') => '\n',
+                    let escaped: u8 = match self.advance() {
+                        Some('a') => 0x07,
+                        Some('b') => 0x08,
+                        Some('f') => 0x0c,
+                        Some('n') => b'\n',
+                        Some('r') => b'\r',
+                        Some('t') => b'\t',
+                        Some('v') => 0x0b,
+                        Some('\\') => b'\\',
+                        Some('"') => b'"',
+                        Some('\'') => b'\'',
+                        Some('\n') => b'\n',
                         Some(d1 @ '0'..='9') => {
                             // Decimal escape \ddd (up to 3 digits, value <= 255)
                             let mut num = d1.to_digit(10).unwrap();
@@ -462,7 +462,7 @@ impl<'a> Lexer<'a> {
                                     format!("decimal escape too large: {}", num),
                                 ));
                             }
-                            (num as u8) as char
+                            num as u8
                         }
                         Some('x') => {
                             // Hex escape \xXX
@@ -470,7 +470,7 @@ impl<'a> Lexer<'a> {
                             let h2 = self.advance().and_then(|c| c.to_digit(16));
                             match (h1, h2) {
                                 (Some(d1), Some(d2)) => {
-                                    ((d1 * 16 + d2) as u8) as char
+                                    (d1 * 16 + d2) as u8
                                 }
                                 _ => {
                                     return Err(LuaError::SyntaxError(
@@ -484,7 +484,7 @@ impl<'a> Lexer<'a> {
                             self.skip_whitespace_and_comments();
                             continue;
                         }
-                        Some(c) => c,
+                        Some(c) => c as u8,
                         None => {
                             return Err(LuaError::SyntaxError(
                                 "unterminated string".to_string(),
@@ -493,7 +493,12 @@ impl<'a> Lexer<'a> {
                     };
                     s.push(escaped);
                 }
-                Some(c) => s.push(c),
+                Some(c) => {
+                    // Handle multi-byte UTF-8 chars in source by encoding as bytes
+                    let mut buf = [0u8; 4];
+                    let encoded = c.encode_utf8(&mut buf);
+                    s.extend_from_slice(encoded.as_bytes());
+                }
             }
         }
 
@@ -501,7 +506,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Read a long string [[...]] or [=[...]=]
-    fn read_long_string(&mut self) -> LuaResult<String> {
+    fn read_long_string(&mut self) -> LuaResult<Vec<u8>> {
         // Count the = signs
         let mut level = 0;
         while self.match_char('=') {
@@ -519,7 +524,7 @@ impl<'a> Lexer<'a> {
             self.advance();
         }
 
-        let mut s = String::new();
+        let mut s: Vec<u8> = Vec::new();
 
         loop {
             match self.advance() {
@@ -539,12 +544,17 @@ impl<'a> Lexer<'a> {
                         break;
                     }
                     // Not a closing delimiter, add to string
-                    s.push(']');
+                    s.push(b']');
                     for _ in 0..closing_level {
-                        s.push('=');
+                        s.push(b'=');
                     }
                 }
-                Some(c) => s.push(c),
+                Some(c) => {
+                    // Handle multi-byte UTF-8 chars in source
+                    let mut buf = [0u8; 4];
+                    let encoded = c.encode_utf8(&mut buf);
+                    s.extend_from_slice(encoded.as_bytes());
+                }
             }
         }
 
@@ -798,15 +808,15 @@ mod tests {
         let mut lexer = Lexer::new(r#""hello" 'world' [[long]]"#);
 
         match lexer.next().unwrap().kind {
-            TokenKind::String(s) => assert_eq!(s, "hello"),
+            TokenKind::String(s) => assert_eq!(s, b"hello"),
             _ => panic!("expected string"),
         }
         match lexer.next().unwrap().kind {
-            TokenKind::String(s) => assert_eq!(s, "world"),
+            TokenKind::String(s) => assert_eq!(s, b"world"),
             _ => panic!("expected string"),
         }
         match lexer.next().unwrap().kind {
-            TokenKind::String(s) => assert_eq!(s, "long"),
+            TokenKind::String(s) => assert_eq!(s, b"long"),
             _ => panic!("expected string"),
         }
     }
