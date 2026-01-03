@@ -3,6 +3,20 @@
 use crate::value::{Value, LuaError, LuaResult};
 use crate::vm::State;
 use std::f64::consts::{PI, E};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Global random state using a simple xorshift64 PRNG
+static RANDOM_STATE: AtomicU64 = AtomicU64::new(1);
+
+/// xorshift64 - fast, reasonable quality PRNG
+fn xorshift64() -> u64 {
+    let mut x = RANDOM_STATE.load(Ordering::Relaxed);
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    RANDOM_STATE.store(x, Ordering::Relaxed);
+    x
+}
 
 /// Register math library
 pub fn register_math(state: &mut State) {
@@ -197,38 +211,40 @@ fn math_rad(state: &mut State) -> LuaResult<usize> {
 }
 
 fn math_random(state: &mut State) -> LuaResult<usize> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    // Simple LCG random for now
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
+    let rand_val = xorshift64();
 
     let n = state.get_top();
     if n == 0 {
         // Return [0, 1)
-        let r = (seed as f64) / (u64::MAX as f64);
+        let r = (rand_val as f64) / (u64::MAX as f64);
         state.push(Value::number(r))?;
     } else if n == 1 {
         // Return [1, m]
         let m = get_num(state, 1)? as u64;
-        let r = (seed % m) + 1;
+        if m == 0 {
+            return Err(LuaError::RuntimeError("bad argument #1 (interval is empty)".to_string()));
+        }
+        let r = (rand_val % m) + 1;
         state.push(Value::number(r as f64))?;
     } else {
         // Return [m, n]
         let m = get_num(state, 1)? as i64;
-        let n = get_num(state, 2)? as i64;
-        let range = (n - m + 1) as u64;
-        let r = m + (seed % range) as i64;
+        let upper = get_num(state, 2)? as i64;
+        if upper < m {
+            return Err(LuaError::RuntimeError("bad argument #2 (interval is empty)".to_string()));
+        }
+        let range = (upper - m + 1) as u64;
+        let r = m + (rand_val % range) as i64;
         state.push(Value::number(r as f64))?;
     }
     Ok(1)
 }
 
 fn math_randomseed(state: &mut State) -> LuaResult<usize> {
-    // Seed is ignored in this simple implementation
-    let _seed = get_num(state, 1)?;
+    let seed = get_num(state, 1)? as u64;
+    // Ensure seed is non-zero (xorshift requires non-zero state)
+    let seed = if seed == 0 { 1 } else { seed };
+    RANDOM_STATE.store(seed, Ordering::Relaxed);
     Ok(0)
 }
 
