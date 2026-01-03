@@ -315,9 +315,9 @@ impl<'a> Compiler<'a> {
             let cond = self.parse_expression()?;
             let cond_reg = self.expr_to_register(cond)?;
 
-            // Emit test and jump
+            // Emit test and jump: IST skips JMP if true (fall through to then block)
             let line = self.current_line();
-            self.fs_mut().emit(Instruction::ad(Opcode::ISF, 0, cond_reg as u16), line);
+            self.fs_mut().emit(Instruction::ad(Opcode::IST, 0, cond_reg as u16), line);
             let false_jump = self.fs_mut().emit(Instruction::adj(Opcode::JMP, 0, 0), line);
 
             self.lexer.expect(TokenKind::Then)?;
@@ -376,7 +376,8 @@ impl<'a> Compiler<'a> {
 
         // Emit test and jump if false
         let line = self.current_line();
-        self.fs_mut().emit(Instruction::ad(Opcode::ISF, 0, cond_reg as u16), line);
+        // IST skips JMP if true (continue loop), else JMP exits
+        self.fs_mut().emit(Instruction::ad(Opcode::IST, 0, cond_reg as u16), line);
         let exit_jump = self.fs_mut().emit(Instruction::adj(Opcode::JMP, 0, 0), line);
 
         self.lexer.expect(TokenKind::Do)?;
@@ -606,9 +607,9 @@ impl<'a> Compiler<'a> {
         let cond = self.parse_expression()?;
         let cond_reg = self.expr_to_register(cond)?;
 
-        // Emit test and jump back if false
+        // IST skips JMP if true (exit loop), else JMP continues loop
         let line = self.current_line();
-        self.fs_mut().emit(Instruction::ad(Opcode::ISF, 0, cond_reg as u16), line);
+        self.fs_mut().emit(Instruction::ad(Opcode::IST, 0, cond_reg as u16), line);
         let pc = self.fs().current_pc();
         let offset = loop_start as i16 - pc as i16;
         self.fs_mut().emit(Instruction::adj(Opcode::JMP, 0, offset), line);
@@ -639,12 +640,12 @@ impl<'a> Compiler<'a> {
         // Parse function body
         let proto = self.parse_function_body(false)?;
 
+        // Add child proto to parent and get index
+        let proto_idx = self.fs().proto.child_protos.len();
+        self.fs_mut().proto.child_protos.push(Box::new(proto));
+
         // Create closure and assign
         let line = self.current_line();
-        let proto_idx = self.fs().proto.protos.len();
-        // Note: We'd need proper GcRef here in real implementation
-        // For now just track the proto index
-
         let reg = self.fs_mut().reserve_reg();
         self.fs_mut().emit(Instruction::ad(Opcode::FNEW, reg, proto_idx as u16), line);
 
@@ -677,9 +678,13 @@ impl<'a> Compiler<'a> {
                 is_captured: false,
             });
 
-            let _proto = self.parse_function_body(false)?;
+            let proto = self.parse_function_body(false)?;
+
+            // Add child proto to parent and get index
+            let proto_idx = self.fs().proto.child_protos.len();
+            self.fs_mut().proto.child_protos.push(Box::new(proto));
+
             let line = self.current_line();
-            let proto_idx = self.fs().proto.protos.len();
             self.fs_mut().emit(Instruction::ad(Opcode::FNEW, slot, proto_idx as u16), line);
         } else {
             // local name1, name2, ... = expr1, expr2, ...
@@ -753,19 +758,23 @@ impl<'a> Compiler<'a> {
             return Ok(());
         }
 
-        // Parse return values
-        let base = self.fs().free_reg;
+        // Parse return values - track where each value actually ends up
+        let mut first_reg = None;
         let mut count = 0u8;
 
         loop {
             let expr = self.parse_expression()?;
-            self.expr_to_next_reg(expr)?;
+            let reg = self.expr_to_next_reg(expr)?;
+            if first_reg.is_none() {
+                first_reg = Some(reg);
+            }
             count += 1;
             if !self.lexer.match_token(&TokenKind::Comma)? {
                 break;
             }
         }
 
+        let base = first_reg.unwrap_or(0);
         if count == 1 {
             self.fs_mut().emit(Instruction::ad(Opcode::RET1, base, 2), line);
         } else {
@@ -835,14 +844,16 @@ impl<'a> Compiler<'a> {
 
         self.lexer.expect(TokenKind::Eq)?;
 
-        // Parse values
-        let mut num_values = 0;
-        let base = self.fs().free_reg;
+        // Save free_reg to restore after assignment (temporaries not needed)
+        let saved_free_reg = self.fs().free_reg;
+
+        // Parse values - track where each value ends up
+        let mut value_regs = Vec::new();
 
         loop {
             let expr = self.parse_expression()?;
-            self.expr_to_next_reg(expr)?;
-            num_values += 1;
+            let reg = self.expr_to_next_reg(expr)?;
+            value_regs.push(reg);
             if !self.lexer.match_token(&TokenKind::Comma)? {
                 break;
             }
@@ -850,7 +861,7 @@ impl<'a> Compiler<'a> {
 
         // Assign values to targets
         for (i, target) in targets.iter().enumerate() {
-            let val_reg = base + i as u8;
+            let val_reg = value_regs.get(i).copied().unwrap_or(0);
             let line = self.current_line();
 
             match target {
@@ -893,7 +904,7 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        self.fs_mut().free_reg = base;
+        self.fs_mut().free_reg = saved_free_reg;
         Ok(())
     }
 
@@ -984,17 +995,17 @@ impl<'a> Compiler<'a> {
 
             let line = self.current_line();
 
-            // Emit comparison
+            // Materialize boolean result:
+            // 1. Set true first (KPRI D=2)
+            // 2. Emit comparison (IS* skips next if true)
+            // 3. Set false (KPRI D=1) - only reached if comparison was false
+            let result = self.fs_mut().reserve_reg();
+            self.fs_mut().emit(Instruction::ad(Opcode::KPRI, result, 2), line); // true
             self.fs_mut().emit(
                 Instruction::ad(op, left_reg, right_reg as u16),
                 line,
             );
-
-            // Result in register (need to materialize boolean)
-            let result = self.fs_mut().reserve_reg();
-            self.fs_mut().emit(Instruction::ad(Opcode::KPRI, result, 1), line); // true
-            let skip = self.fs_mut().emit(Instruction::adj(Opcode::JMP, 0, 1), line);
-            self.fs_mut().emit(Instruction::ad(Opcode::KPRI, result, 2), line); // false
+            self.fs_mut().emit(Instruction::ad(Opcode::KPRI, result, 1), line); // false
 
             left = ExprDesc::Register(result);
         }
@@ -1047,14 +1058,17 @@ impl<'a> Compiler<'a> {
             let right = self.parse_mul_expr()?;
             let right_reg = self.expr_to_register(right)?;
 
+            // Allocate a new register for the result to avoid clobbering source
+            let result_reg = self.fs_mut().reserve_reg();
             let line = self.current_line();
             self.fs_mut().emit(
-                Instruction::abc(op, left_reg, left_reg, right_reg),
+                Instruction::abc(op, result_reg, left_reg, right_reg),
                 line,
             );
-            self.fs_mut().free_regs(1);
+            // Free the operand registers if they were temporary
+            self.fs_mut().free_reg = result_reg + 1;
 
-            left = ExprDesc::Register(left_reg);
+            left = ExprDesc::Register(result_reg);
         }
 
         Ok(left)
@@ -1077,14 +1091,16 @@ impl<'a> Compiler<'a> {
             let right = self.parse_unary_expr()?;
             let right_reg = self.expr_to_register(right)?;
 
+            // Allocate a new register for the result to avoid clobbering source
+            let result_reg = self.fs_mut().reserve_reg();
             let line = self.current_line();
             self.fs_mut().emit(
-                Instruction::abc(op, left_reg, left_reg, right_reg),
+                Instruction::abc(op, result_reg, left_reg, right_reg),
                 line,
             );
-            self.fs_mut().free_regs(1);
+            self.fs_mut().free_reg = result_reg + 1;
 
-            left = ExprDesc::Register(left_reg);
+            left = ExprDesc::Register(result_reg);
         }
 
         Ok(left)
@@ -1128,14 +1144,16 @@ impl<'a> Compiler<'a> {
             let right = self.parse_unary_expr()?; // Right associative
             let right_reg = self.expr_to_register(right)?;
 
+            // Allocate a new register for the result to avoid clobbering source
+            let result_reg = self.fs_mut().reserve_reg();
             let line = self.current_line();
             self.fs_mut().emit(
-                Instruction::abc(Opcode::POW, left_reg, left_reg, right_reg),
+                Instruction::abc(Opcode::POW, result_reg, left_reg, right_reg),
                 line,
             );
-            self.fs_mut().free_regs(1);
+            self.fs_mut().free_reg = result_reg + 1;
 
-            left = ExprDesc::Register(left_reg);
+            left = ExprDesc::Register(result_reg);
         }
 
         Ok(left)
@@ -1192,8 +1210,14 @@ impl<'a> Compiler<'a> {
     }
 
     fn parse_call_expr(&mut self, func: ExprDesc, _is_method: bool) -> LuaResult<ExprDesc> {
-        let base = self.expr_to_register(func)?;
         let line = self.current_line();
+
+        // Move function to a contiguous register block at free_reg.
+        // This ensures arguments can be placed immediately after the function.
+        let base = self.fs().free_reg;
+        self.expr_to_reg(func, base)?;
+        // Set free_reg to base + 1 so arguments go immediately after function
+        self.fs_mut().free_reg = base + 1;
 
         let num_args = match &self.lexer.peek()?.kind {
             TokenKind::LParen => {
@@ -1201,11 +1225,12 @@ impl<'a> Compiler<'a> {
                 let mut count = 0u8;
                 if !self.lexer.check(&TokenKind::RParen)? {
                     loop {
-                        // Save target register BEFORE parsing, since parsing
-                        // the argument expression may allocate registers
+                        // Target register for this argument
                         let target = self.fs().free_reg;
                         let arg = self.parse_expression()?;
                         self.expr_to_reg(arg, target)?;
+                        // Ensure next arg goes to next slot
+                        self.fs_mut().free_reg = target + 1;
                         count += 1;
                         if !self.lexer.match_token(&TokenKind::Comma)? {
                             break;
@@ -1287,9 +1312,13 @@ impl<'a> Compiler<'a> {
             }
             TokenKind::Function => {
                 self.lexer.next()?;
-                let _proto = self.parse_function_body(false)?;
+                let proto = self.parse_function_body(false)?;
+
+                // Add child proto to parent and get index
+                let proto_idx = self.fs().proto.child_protos.len();
+                self.fs_mut().proto.child_protos.push(Box::new(proto));
+
                 let line = self.current_line();
-                let proto_idx = self.fs().proto.protos.len();
                 let reg = self.fs_mut().reserve_reg();
                 self.fs_mut().emit(Instruction::ad(Opcode::FNEW, reg, proto_idx as u16), line);
                 Ok(ExprDesc::Register(reg))

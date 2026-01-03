@@ -19,8 +19,10 @@ pub struct Proto {
     pub constants: Vec<Value>,
     /// String constants (stored as raw bytes, interned at runtime)
     pub string_constants: Vec<String>,
-    /// Nested function prototypes
+    /// Nested function prototypes (GC-allocated at load time)
     pub protos: Vec<GcRef<Proto>>,
+    /// Child prototypes (compile-time storage, moved to protos at load time)
+    pub child_protos: Vec<Box<Proto>>,
     /// Upvalue descriptors
     pub upvalues: Vec<UpvalueDesc>,
     /// Line number info (bytecode index -> line number)
@@ -78,6 +80,7 @@ impl Proto {
             constants: Vec::new(),
             string_constants: Vec::new(),
             protos: Vec::new(),
+            child_protos: Vec::new(),
             upvalues: Vec::new(),
             lineinfo: Vec::new(),
             locvars: Vec::new(),

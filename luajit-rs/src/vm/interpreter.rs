@@ -50,6 +50,10 @@ impl<'a> Interpreter<'a> {
         let proto = unsafe { &*(*closure.as_ptr()).proto.as_ptr() };
         let base = func_idx + 1;
 
+        // Save caller's stack state
+        let saved_base = self.state.stack.base();
+        let saved_top = self.state.stack.top();
+
         // Adjust arguments to match parameters
         let num_params = proto.num_params as usize;
         let current_args = nargs;
@@ -82,8 +86,11 @@ impl<'a> Interpreter<'a> {
         // Execute
         let result = self.execute();
 
-        // Clean up
+        // Clean up - restore caller's stack state
         self.state.call_stack.pop();
+        self.state.stack.set_base(saved_base);
+        // The return value is at func_idx; set top to include it
+        self.state.stack.set_top(func_idx + 1.max(saved_top));
 
         result
     }

@@ -251,10 +251,21 @@ impl State {
     /// Load and compile a chunk
     pub fn load_string(&mut self, source: &str, chunk_name: &str) -> LuaResult<GcRef<Function>> {
         let proto = crate::parser::parse(source, chunk_name)?;
-        let proto_ref = self.gc.alloc(proto);
+        let proto_ref = self.allocate_proto_tree(proto);
         let closure = Closure::new(proto_ref, Some(self.globals));
         let func = Function::Lua(closure);
         Ok(self.gc.alloc(func))
+    }
+
+    /// Recursively allocate a prototype and all its child protos
+    fn allocate_proto_tree(&mut self, mut proto: Proto) -> GcRef<Proto> {
+        // Recursively allocate child protos first (bottom-up)
+        for child_proto in proto.child_protos.drain(..) {
+            let child_ref = self.allocate_proto_tree(*child_proto);
+            proto.protos.push(child_ref);
+        }
+        // Now allocate this proto
+        self.gc.alloc(proto)
     }
 
     /// Call a function on the stack
