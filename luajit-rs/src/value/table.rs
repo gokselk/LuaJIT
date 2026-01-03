@@ -224,19 +224,77 @@ impl Table {
             return len;
         }
 
-        // Calculate length
+        // Calculate length - find a boundary n where t[n] is not nil and t[n+1] is nil
         let array = self.array.borrow();
+        let hash = self.hash.borrow();
 
-        // Find the boundary: an index where t[i] is not nil and t[i+1] is nil
-        let mut len = 0;
-        for (i, v) in array.iter().enumerate() {
-            if v.is_nil() {
-                break;
+        // Helper to check if index i (1-based) has a non-nil value
+        let has_value = |i: usize| -> bool {
+            if i == 0 {
+                return false;
             }
-            len = i + 1;
+            let idx = i - 1;
+            if idx < array.len() {
+                if !array[idx].is_nil() {
+                    return true;
+                }
+            }
+            // Check hash part
+            let key = TableKey::Integer(i as i64);
+            if let Some(v) = hash.get(&key) {
+                return !v.is_nil();
+            }
+            false
+        };
+
+        // First try the array part - find first nil
+        let mut len = 0;
+        for (idx, v) in array.iter().enumerate() {
+            let i = idx + 1; // 1-based index
+            if v.is_nil() {
+                // Check if there's a value in hash part that extends the sequence
+                if !has_value(i) {
+                    break;
+                }
+            }
+            len = i;
+        }
+
+        // If array is fully used, check if hash part continues the sequence
+        if len == array.len() {
+            // Check consecutive integers in hash part
+            loop {
+                let next_i = len + 1;
+                if has_value(next_i) {
+                    len = next_i;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Also check for sparse arrays - if the above gave 0 but there are integer keys in hash
+        if len == 0 && !hash.is_empty() {
+            // Find any positive integer key in the hash - this creates a boundary
+            // We look for the largest integer key where t[n] is non-nil and t[n+1] is nil
+            let mut max_boundary = 0;
+            for key in hash.keys() {
+                if let TableKey::Integer(k) = key {
+                    let k = *k;
+                    if k > 0 && !hash.get(&TableKey::Integer(k + 1)).map(|v| !v.is_nil()).unwrap_or(false) {
+                        // This is a valid boundary: t[k] exists and t[k+1] doesn't
+                        if k as usize > max_boundary {
+                            max_boundary = k as usize;
+                        }
+                    }
+                }
+            }
+            len = max_boundary;
         }
 
         // Cache the result
+        drop(array);
+        drop(hash);
         self.cached_len.set(Some(len));
         len
     }
