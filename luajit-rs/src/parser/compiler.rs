@@ -104,6 +104,39 @@ impl FunctionState {
         self.proto.add_instruction(instr, line)
     }
 
+    /// Emit a table set instruction for an array index.
+    /// Uses TSETB for small indices (1-255), otherwise uses TSETV with a temp register.
+    fn emit_tset_index(&mut self, table_reg: u8, val_reg: u8, index: u32, line: u32) {
+        if index <= 255 {
+            // Use TSETB for small indices
+            self.emit(
+                Instruction::abc(Opcode::TSETB, table_reg, val_reg, index as u8),
+                line,
+            );
+        } else {
+            // For large indices, load into a temp register and use TSETV
+            let key_reg = self.reserve_reg();
+            if index <= 0x7FFF {
+                self.emit(
+                    Instruction::ad(Opcode::KSHORT, key_reg, index as u16),
+                    line,
+                );
+            } else {
+                // For very large indices, use KNUM
+                let const_idx = self.add_constant(Value::integer(index as i32));
+                self.emit(
+                    Instruction::ad(Opcode::KNUM, key_reg, const_idx as u16),
+                    line,
+                );
+            }
+            self.emit(
+                Instruction::abc(Opcode::TSETV, table_reg, val_reg, key_reg),
+                line,
+            );
+            self.free_regs(1);
+        }
+    }
+
     fn add_constant(&mut self, value: Value) -> usize {
         self.proto.add_constant(value)
     }
@@ -1882,7 +1915,24 @@ impl<'a> Compiler<'a> {
                 self.lexer.next()?;
                 let expr = self.parse_expression()?;
                 self.lexer.expect(TokenKind::RParen)?;
-                Ok(expr)
+                // Parentheses force multi-return expressions to return exactly 1 value
+                match expr {
+                    ExprDesc::Call(base, _, pc) => {
+                        // Patch call to return exactly 1 result (C=2)
+                        let mut call_instr = self.fs().proto.code[pc];
+                        call_instr.set_c(2); // C=2 means 1 result
+                        self.fs_mut().proto.code[pc] = call_instr;
+                        Ok(ExprDesc::Register(base))
+                    }
+                    ExprDesc::Vararg => {
+                        // Vararg in parentheses returns just 1 value
+                        let reg = self.fs_mut().reserve_reg();
+                        let line = self.current_line();
+                        self.fs_mut().emit(Instruction::abc(Opcode::VARG, reg, 2, 0), line);
+                        Ok(ExprDesc::Register(reg))
+                    }
+                    _ => Ok(expr)
+                }
             }
             TokenKind::Name(name) => {
                 let name = name.clone();
@@ -2046,6 +2096,9 @@ impl<'a> Compiler<'a> {
 
         let mut array_count = 0u32;
         let mut hash_count = 0u32;
+        // Save the free_reg after table is allocated - we'll reset to this after each element
+        // to avoid exhausting registers in large tables
+        let base_free_reg = self.fs().free_reg;
 
         loop {
             if self.lexer.check(&TokenKind::RBrace)? {
@@ -2146,9 +2199,12 @@ impl<'a> Compiler<'a> {
 
                         // Check if expr is a Call - handle multi-return for last element
                         if let ExprDesc::Call(call_base, _nresults, call_pc) = expr {
-                            // Check if this is the last element (no comma/semicolon before })
-                            let is_last = !self.lexer.check(&TokenKind::Comma)? &&
-                                         !self.lexer.check(&TokenKind::Semicolon)?;
+                            // Check if this is the last element
+                            // It's last if there's no separator OR if separator is followed by }
+                            let no_separator = !self.lexer.check(&TokenKind::Comma)? &&
+                                              !self.lexer.check(&TokenKind::Semicolon)?;
+                            let trailing_sep = self.lexer.is_trailing_separator_before_rbrace()?;
+                            let is_last = no_separator || trailing_sep;
                             let line = self.current_line();
                             if is_last {
                                 // Patch the call to return all values (C=0 for variable results)
@@ -2158,20 +2214,28 @@ impl<'a> Compiler<'a> {
                                 let b = instr.b();
                                 code[call_pc] = Instruction::abc(instr.opcode(), a, b, 0);
 
+                                // TSETM reads table from A and values from A+1 to top
+                                // So we need to put the table at call_base - 1
+                                let tsetm_base = call_base.saturating_sub(1);
+                                if tsetm_base != reg {
+                                    // Move table to correct position (MOV uses A-D format)
+                                    self.fs_mut().emit(
+                                        Instruction::ad(Opcode::MOV, tsetm_base, reg as u16),
+                                        line,
+                                    );
+                                }
+
                                 // Use TSETM to set multiple values from call_base to top
                                 // D = array_count + 1 (next index, 1-based)
                                 self.fs_mut().emit(
-                                    Instruction::ad(Opcode::TSETM, reg, (array_count + 1) as u16),
+                                    Instruction::ad(Opcode::TSETM, tsetm_base, (array_count + 1) as u16),
                                     line,
                                 );
                                 // Don't increment array_count as we don't know how many were added
                             } else {
                                 // Not last element, just take first return value
                                 array_count += 1;
-                                self.fs_mut().emit(
-                                    Instruction::abc(Opcode::TSETB, reg, call_base, array_count as u8),
-                                    line,
-                                );
+                                self.fs_mut().emit_tset_index(reg, call_base, array_count, line);
                             }
                         } else {
                             // Continue with binary operations if any
@@ -2181,10 +2245,7 @@ impl<'a> Compiler<'a> {
                             array_count += 1;
 
                             let line = self.current_line();
-                            self.fs_mut().emit(
-                                Instruction::abc(Opcode::TSETB, reg, val_reg, array_count as u8),
-                                line,
-                            );
+                            self.fs_mut().emit_tset_index(reg, val_reg, array_count, line);
                         }
                     }
                 }
@@ -2196,9 +2257,11 @@ impl<'a> Compiler<'a> {
                     // Check if this is vararg (...) or a call - handle specially for multi-value expansion
                     match val {
                         ExprDesc::Vararg => {
-                            // Check if this is the last element (no comma/semicolon before })
-                            let is_last = !self.lexer.check(&TokenKind::Comma)? &&
-                                         !self.lexer.check(&TokenKind::Semicolon)?;
+                            // Check if this is the last element
+                            let no_separator = !self.lexer.check(&TokenKind::Comma)? &&
+                                              !self.lexer.check(&TokenKind::Semicolon)?;
+                            let trailing_sep = self.lexer.is_trailing_separator_before_rbrace()?;
+                            let is_last = no_separator || trailing_sep;
                             if is_last {
                                 // Use VARG with B=0 (variable count) starting at reg+1
                                 self.fs_mut().emit(
@@ -2220,16 +2283,15 @@ impl<'a> Compiler<'a> {
                                     line,
                                 );
                                 array_count += 1;
-                                self.fs_mut().emit(
-                                    Instruction::abc(Opcode::TSETB, reg, val_reg, array_count as u8),
-                                    line,
-                                );
+                                self.fs_mut().emit_tset_index(reg, val_reg, array_count, line);
                             }
                         }
                         ExprDesc::Call(call_base, _nresults, call_pc) => {
-                            // Check if this is the last element (no comma/semicolon before })
-                            let is_last = !self.lexer.check(&TokenKind::Comma)? &&
-                                         !self.lexer.check(&TokenKind::Semicolon)?;
+                            // Check if this is the last element
+                            let no_separator = !self.lexer.check(&TokenKind::Comma)? &&
+                                              !self.lexer.check(&TokenKind::Semicolon)?;
+                            let trailing_sep = self.lexer.is_trailing_separator_before_rbrace()?;
+                            let is_last = no_separator || trailing_sep;
                             if is_last {
                                 // Patch the call to return all values (C=0 for variable results)
                                 let code = &mut self.fs_mut().proto.code;
@@ -2238,33 +2300,42 @@ impl<'a> Compiler<'a> {
                                 let b = instr.b();
                                 code[call_pc] = Instruction::abc(instr.opcode(), a, b, 0);
 
+                                // TSETM reads table from A and values from A+1 to top
+                                // So we need to put the table at call_base - 1
+                                let tsetm_base = call_base.saturating_sub(1);
+                                if tsetm_base != reg {
+                                    // Move table to correct position (MOV uses A-D format)
+                                    self.fs_mut().emit(
+                                        Instruction::ad(Opcode::MOV, tsetm_base, reg as u16),
+                                        line,
+                                    );
+                                }
+
                                 // Use TSETM to set multiple values from call_base to top
                                 // D = array_count + 1 (next index, 1-based)
                                 self.fs_mut().emit(
-                                    Instruction::ad(Opcode::TSETM, reg, (array_count + 1) as u16),
+                                    Instruction::ad(Opcode::TSETM, tsetm_base, (array_count + 1) as u16),
                                     line,
                                 );
                                 // Don't increment array_count as we don't know how many were added
                             } else {
                                 // Not last element, just take first return value
                                 array_count += 1;
-                                self.fs_mut().emit(
-                                    Instruction::abc(Opcode::TSETB, reg, call_base, array_count as u8),
-                                    line,
-                                );
+                                self.fs_mut().emit_tset_index(reg, call_base, array_count, line);
                             }
                         }
                         _ => {
                             let val_reg = self.expr_to_register(val)?;
                             array_count += 1;
-                            self.fs_mut().emit(
-                                Instruction::abc(Opcode::TSETB, reg, val_reg, array_count as u8),
-                                line,
-                            );
+                            self.fs_mut().emit_tset_index(reg, val_reg, array_count, line);
                         }
                     }
                 }
             }
+
+            // Reset free_reg to avoid register exhaustion in large tables
+            // This ensures each element uses the same temporary registers
+            self.fs_mut().free_reg = base_free_reg;
 
             // Optional separator
             if !self.lexer.match_token(&TokenKind::Comma)? &&

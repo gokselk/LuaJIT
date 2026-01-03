@@ -102,8 +102,8 @@ pub struct Lexer<'a> {
     current_pos: usize,
     line: u32,
     column: u32,
-    /// Lookahead token
-    peeked: Option<Token>,
+    /// Lookahead buffer (up to 2 tokens)
+    peeked: Vec<Token>,
 }
 
 impl<'a> Lexer<'a> {
@@ -115,7 +115,7 @@ impl<'a> Lexer<'a> {
             current_pos: 0,
             line: 1,
             column: 1,
-            peeked: None,
+            peeked: Vec::with_capacity(2),
         }
     }
 
@@ -126,24 +126,47 @@ impl<'a> Lexer<'a> {
 
     /// Peek at the next token without consuming it
     pub fn peek(&mut self) -> LuaResult<&Token> {
-        if self.peeked.is_none() {
-            self.peeked = Some(self.next_token()?);
+        if self.peeked.is_empty() {
+            let token = self.next_token()?;
+            self.peeked.push(token);
         }
-        Ok(self.peeked.as_ref().unwrap())
+        Ok(&self.peeked[0])
     }
 
     /// Get the next token
     pub fn next(&mut self) -> LuaResult<Token> {
-        if let Some(token) = self.peeked.take() {
-            Ok(token)
+        if !self.peeked.is_empty() {
+            Ok(self.peeked.remove(0))
         } else {
             self.next_token()
         }
     }
 
+    /// Peek at the second token (after the first peeked token)
+    pub fn peek_second(&mut self) -> LuaResult<&Token> {
+        // Ensure we have at least 2 tokens peeked
+        while self.peeked.len() < 2 {
+            let token = self.next_token()?;
+            self.peeked.push(token);
+        }
+        Ok(&self.peeked[1])
+    }
+
     /// Check if next token matches the given kind
     pub fn check(&mut self, kind: &TokenKind) -> LuaResult<bool> {
         Ok(&self.peek()?.kind == kind)
+    }
+
+    /// Check if there's a trailing separator (comma/semicolon followed by closing brace)
+    /// This is used for table constructors to determine if a call/vararg is the last element
+    pub fn is_trailing_separator_before_rbrace(&mut self) -> LuaResult<bool> {
+        // Check if current token is comma or semicolon
+        let is_sep = self.check(&TokenKind::Comma)? || self.check(&TokenKind::Semicolon)?;
+        if !is_sep {
+            return Ok(false);
+        }
+        // Peek at the token after the separator
+        Ok(self.peek_second()?.kind == TokenKind::RBrace)
     }
 
     /// Consume the next token if it matches
