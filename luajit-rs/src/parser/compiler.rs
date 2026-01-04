@@ -1988,6 +1988,8 @@ impl<'a> Compiler<'a> {
                 let expr = self.parse_expression()?;
                 self.lexer.expect(TokenKind::RParen)?;
                 // Parentheses force multi-return expressions to return exactly 1 value
+                // Also, parenthesized expressions are "callable" (can have suffixes),
+                // so we must convert literals to registers.
                 match expr {
                     ExprDesc::Call(base, _, pc) => {
                         // Patch call to return exactly 1 result (C=2)
@@ -2001,6 +2003,11 @@ impl<'a> Compiler<'a> {
                         let reg = self.fs_mut().reserve_reg();
                         let line = self.current_line();
                         self.fs_mut().emit(Instruction::abc(Opcode::VARG, reg, 2, 0), line);
+                        Ok(ExprDesc::Register(reg))
+                    }
+                    // For literals, convert to register so they can have suffixes
+                    ExprDesc::Number(_) | ExprDesc::String(_) | ExprDesc::Nil | ExprDesc::Bool(_) => {
+                        let reg = self.expr_to_next_reg(expr)?;
                         Ok(ExprDesc::Register(reg))
                     }
                     _ => Ok(expr)
