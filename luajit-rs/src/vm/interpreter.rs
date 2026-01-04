@@ -488,34 +488,65 @@ impl<'a> Interpreter<'a> {
 
     /// Compare with __lt metamethod fallback
     /// Returns Ok(Some(bool)) if comparison succeeded, Ok(None) if no metamethod
+    /// In Lua 5.1/LuaJIT mode, both operands must have the SAME __lt metamethod
     fn compare_lt(&mut self, a: Value, b: Value) -> LuaResult<Option<bool>> {
-        // Try __lt from first operand
-        if let Some(mm) = self.get_metamethod(&a, "__lt") {
-            return Ok(Some(self.call_compare_metamethod(mm, a, b, "__lt")?));
+        let mm_a = self.get_metamethod(&a, "__lt");
+        let mm_b = self.get_metamethod(&b, "__lt");
+
+        match (mm_a, mm_b) {
+            (Some(mma), Some(mmb)) if mma.raw_eq(&mmb) => {
+                // Both have the same __lt metamethod
+                Ok(Some(self.call_compare_metamethod(mma, a, b, "__lt")?))
+            }
+            (Some(_), Some(_)) => {
+                // Different metamethods - error in Lua 5.1 mode
+                Err(LuaError::CompareError(a.lua_type(), b.lua_type()))
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                // Only one has metamethod - check if same metatable
+                // In Lua 5.1, this should error, but LuaJIT is more lenient when
+                // both operands are the same type with same metatable
+                // For now, follow strict Lua 5.1 semantics: both must have same mm
+                Err(LuaError::CompareError(a.lua_type(), b.lua_type()))
+            }
+            (None, None) => Ok(None),
         }
-        // Try __lt from second operand
-        if let Some(mm) = self.get_metamethod(&b, "__lt") {
-            return Ok(Some(self.call_compare_metamethod(mm, a, b, "__lt")?));
-        }
-        Ok(None)
     }
 
     /// Compare with __le metamethod fallback
     /// Returns Ok(Some(bool)) if comparison succeeded, Ok(None) if no metamethod
+    /// In Lua 5.1/LuaJIT mode, both operands must have the SAME __le metamethod
     fn compare_le(&mut self, a: Value, b: Value) -> LuaResult<Option<bool>> {
-        // Try __le from first operand
-        if let Some(mm) = self.get_metamethod(&a, "__le") {
-            return Ok(Some(self.call_compare_metamethod(mm, a.clone(), b.clone(), "__le")?));
+        let mm_a = self.get_metamethod(&a, "__le");
+        let mm_b = self.get_metamethod(&b, "__le");
+
+        match (mm_a, mm_b) {
+            (Some(mma), Some(mmb)) if mma.raw_eq(&mmb) => {
+                // Both have the same __le metamethod
+                Ok(Some(self.call_compare_metamethod(mma, a.clone(), b.clone(), "__le")?))
+            }
+            (Some(_), Some(_)) => {
+                // Different metamethods - fall back to not(b < a)
+                if let Some(result) = self.compare_lt(b, a)? {
+                    return Ok(Some(!result));
+                }
+                Err(LuaError::CompareError(a.lua_type(), b.lua_type()))
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                // Only one has __le - fall back to not(b < a)
+                if let Some(result) = self.compare_lt(b, a)? {
+                    return Ok(Some(!result));
+                }
+                Err(LuaError::CompareError(a.lua_type(), b.lua_type()))
+            }
+            (None, None) => {
+                // No __le - fall back to not(b < a) if __lt is available
+                if let Some(result) = self.compare_lt(b, a)? {
+                    return Ok(Some(!result));
+                }
+                Ok(None)
+            }
         }
-        // Try __le from second operand
-        if let Some(mm) = self.get_metamethod(&b, "__le") {
-            return Ok(Some(self.call_compare_metamethod(mm, a.clone(), b.clone(), "__le")?));
-        }
-        // Fall back to not(b < a) if __lt is available
-        if let Some(result) = self.compare_lt(b, a)? {
-            return Ok(Some(!result));
-        }
-        Ok(None)
     }
 
     /// Handle __index metamethod for table/userdata access
@@ -1317,26 +1348,30 @@ impl<'a> Interpreter<'a> {
 
                     // Start with the rightmost value and work left
                     // This handles metamethods correctly: a..b..c = a..(b..c)
-                    let mut right = self.state.stack.get(base + c);
+                    // Always keep intermediate result at base+c on the stack to protect from GC
                     for i in (b..c).rev() {
+                        // Always read from stack to get latest values
                         let left = self.state.stack.get(base + i);
+                        let right = self.state.stack.get(base + c);
 
                         // Try direct string conversion first
                         match (to_concat_string(&left, &self.state), to_concat_string(&right, &self.state)) {
                             (Some(l), Some(r)) => {
-                                let result = format!("{}{}", l, r);
+                                let result_str = format!("{}{}", l, r);
                                 // Track string allocation for GC
-                                self.state.gc.track_external_alloc(result.len() + 32);
-                                right = self.state.intern_string(&result);
+                                self.state.gc.track_external_alloc(result_str.len() + 32);
+                                let result = self.state.intern_string(&result_str);
+                                // Store on stack immediately to protect from GC
+                                self.state.stack.set(base + c, result);
                             }
                             _ => {
                                 // Try __concat metamethod from left, then right
                                 if let Some(mm) = self.get_metamethod(&left, "__concat") {
                                     self.call_binary_metamethod(mm, left, right, base + c, "__concat")?;
-                                    right = self.state.stack.get(base + c);
+                                    // Result is already at base + c
                                 } else if let Some(mm) = self.get_metamethod(&right, "__concat") {
                                     self.call_binary_metamethod(mm, left, right, base + c, "__concat")?;
-                                    right = self.state.stack.get(base + c);
+                                    // Result is already at base + c
                                 } else {
                                     // No metamethod - error
                                     return Err(LuaError::ConcatError(
@@ -1350,7 +1385,9 @@ impl<'a> Interpreter<'a> {
                             }
                         }
                     }
-                    self.state.stack.set(base + a, right);
+                    // Copy final result from base+c to base+a
+                    let result = self.state.stack.get(base + c);
+                    self.state.stack.set(base + a, result);
                     // Check if GC should run after string allocation
                     // Set context so __gc debug info shows "__concat"
                     self.state.gc_trigger_context = Some("__concat".to_string());

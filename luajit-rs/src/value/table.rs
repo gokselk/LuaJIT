@@ -467,6 +467,29 @@ impl Table {
         drop(hash);
         items.into_iter()
     }
+
+    /// Iterate over all key-value pairs in both array and hash parts
+    pub fn iter_all(&self) -> impl Iterator<Item = (Value, Value)> + '_ {
+        let mut items = Vec::new();
+
+        // Array part
+        let array = self.array.borrow();
+        for (i, v) in array.iter().enumerate() {
+            if !v.is_nil() {
+                items.push((Value::integer((i + 1) as i32), *v));
+            }
+        }
+        drop(array);
+
+        // Hash part
+        let hash = self.hash.borrow();
+        for (k, v) in hash.iter() {
+            items.push((self.key_to_value(k), *v));
+        }
+        drop(hash);
+
+        items.into_iter()
+    }
 }
 
 impl Value {

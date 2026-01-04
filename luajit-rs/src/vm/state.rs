@@ -417,8 +417,8 @@ impl State {
         self.strings.begin_gc();
         let mut visited_tables: HashSet<usize> = HashSet::new();
 
-        // Mark strings on the stack
-        for i in 0..self.stack.len() {
+        // Mark strings on the stack (use top() for absolute index)
+        for i in 0..self.stack.top() {
             let val = self.stack.get(i);
             self.mark_value_strings(val, &mut visited_tables);
         }
@@ -488,34 +488,11 @@ impl State {
         // === PHASE 2: Handle userdata finalization ===
         let mut reachable_ud: HashSet<*mut Userdata> = HashSet::new();
 
-        // For userdata tracking, we need to scan the entire stack
-        // but only consider values within active call frames as reachable.
-        // Values in "dead" stack regions (between frame tops and next base)
-        // are stale temporaries and should not be considered reachable.
-
-        // Collect the live ranges from all call frames
-        let mut live_ranges: Vec<(usize, usize)> = Vec::new();
-        for frame in self.call_stack.frames() {
-            // Each frame's live range is base..top
-            if frame.top > frame.base {
-                live_ranges.push((frame.base, frame.top));
-            }
-        }
-        // Also include current stack frame
-        let current_base = self.stack.base();
-        let current_top = self.stack.top();
-        if current_top > current_base {
-            live_ranges.push((current_base, current_top));
-        }
-
+        // Scan entire stack for userdata
         for i in 0..self.stack.top() {
             let val = self.stack.get(i);
             if let Some(ud) = val.as_userdata() {
-                // Check if this slot is in a live range
-                let in_live_range = live_ranges.iter().any(|&(start, end)| i >= start && i < end);
-                if in_live_range {
-                    reachable_ud.insert(ud.as_ptr());
-                }
+                reachable_ud.insert(ud.as_ptr());
             }
         }
         self.mark_table_userdata(self.globals, &mut reachable_ud);
@@ -664,7 +641,8 @@ impl State {
         }
 
         let t = unsafe { &*table.as_ptr() };
-        for (key, value) in t.iter() {
+        // Use iter_all to include both array and hash parts
+        for (key, value) in t.iter_all() {
             self.mark_value_strings(key, visited_tables);
             self.mark_value_strings(value, visited_tables);
         }
@@ -820,6 +798,12 @@ impl State {
 
     /// Format an error with location info
     pub fn format_error(&mut self, error: &LuaError) -> String {
+        // RuntimeErrorNoLocation: don't add location info (error level=0)
+        if let LuaError::RuntimeErrorNoLocation(msg) = error {
+            self.error_location = None;
+            return msg.clone();
+        }
+
         // Use cached error location if available (captured before stack unwinding)
         let location = if let Some(ref loc) = self.error_location {
             loc.clone()

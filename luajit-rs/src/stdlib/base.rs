@@ -136,7 +136,21 @@ fn lua_assert(state: &mut State) -> LuaResult<usize> {
 /// error(message [, level])
 fn lua_error(state: &mut State) -> LuaResult<usize> {
     let msg = state.get_value(1);
-    Err(LuaError::RuntimeError(format_value(&msg)))
+    let msg_str = format_value(&msg);
+
+    // Level 0 means no location info should be added
+    let level = if state.get_top() >= 2 {
+        let level_val = state.get_value(2);
+        level_val.as_integer().unwrap_or(1)
+    } else {
+        1 // Default level is 1
+    };
+
+    if level == 0 {
+        Err(LuaError::RuntimeErrorNoLocation(msg_str))
+    } else {
+        Err(LuaError::RuntimeError(msg_str))
+    }
 }
 
 /// pcall(f, ...) -> status, result...

@@ -90,6 +90,10 @@ pub enum LuaError {
     #[error("{0}")]
     RuntimeError(String),
 
+    /// Runtime error with level=0 (no location info)
+    #[error("{0}")]
+    RuntimeErrorNoLocation(String),
+
     #[error("syntax error: {0}")]
     SyntaxError(String),
 
