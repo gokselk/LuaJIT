@@ -206,15 +206,30 @@ impl<'a> Interpreter<'a> {
 
     /// Look up a metamethod in a value's metatable
     fn get_metamethod(&mut self, val: &Value, method: &str) -> Option<Value> {
-        if let Some(t) = val.as_table() {
+        // Get metatable from table, userdata, or type metatable
+        let metatable = if let Some(t) = val.as_table() {
             let table = unsafe { &*t.as_ptr() };
-            if let Some(mt) = table.get_metatable() {
-                let mt = unsafe { &*mt.as_ptr() };
-                let key = self.state.intern_string(method);
-                let result = mt.get(&key);
-                if !result.is_nil() {
-                    return Some(result);
-                }
+            table.get_metatable()
+        } else if let Some(u) = val.as_userdata() {
+            let userdata = unsafe { &*u.as_ptr() };
+            userdata.get_metatable()
+        } else {
+            // Check type metatable for primitive types (number, string, boolean, etc.)
+            let type_index = val.lua_type() as usize;
+            if type_index < self.state.metatables.len() {
+                self.state.metatables[type_index]
+            } else {
+                None
+            }
+        };
+
+        // Look up the metamethod in the metatable
+        if let Some(mt) = metatable {
+            let mt = unsafe { &*mt.as_ptr() };
+            let key = self.state.intern_string(method);
+            let result = mt.get(&key);
+            if !result.is_nil() {
+                return Some(result);
             }
         }
         None

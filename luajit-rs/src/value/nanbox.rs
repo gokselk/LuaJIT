@@ -54,15 +54,15 @@ const TAG_FUNCTION: u16 = 0xFFF9;
 // For userdata/thread, we use TAG_FUNCTION with a marker bit in the payload
 // Bit 47 (0x0000_8000_0000_0000) distinguishes:
 // - Bit 47 = 0: Function
-// - Bit 47 = 1: Other (userdata or thread, distinguished by bit 46)
+// - Bit 47 = 1: Userdata (or thread if we add thread support later)
 
-/// Marker bit for "other" types (userdata, thread) in payload
+/// Marker bit for userdata type in payload (bit 47)
 const PAYLOAD_OTHER_BIT: u64 = 0x0000_8000_0000_0000;
-/// Marker bit for thread (when OTHER_BIT is set)
+/// Marker bit for thread - currently unused, reserved for future
 const PAYLOAD_THREAD_BIT: u64 = 0x0000_4000_0000_0000;
 
-/// Mask for 46-bit pointer payload (when using marker bits)
-const PAYLOAD_MASK_46: u64 = 0x0000_3FFF_FFFF_FFFF;
+/// Mask for 47-bit pointer payload (for userdata, preserves bits 0-46)
+const PAYLOAD_MASK_47: u64 = 0x0000_7FFF_FFFF_FFFF;
 
 /// Mask for 48-bit pointer payload
 const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
@@ -156,8 +156,9 @@ impl Value {
     /// Create a userdata value from a GC reference
     #[inline]
     pub fn userdata(u: GcRef<Userdata>) -> Self {
-        // Use TAG_FUNCTION with PAYLOAD_OTHER_BIT set, PAYLOAD_THREAD_BIT clear
-        let ptr = u.as_ptr() as u64 & PAYLOAD_MASK_46;
+        // Use TAG_FUNCTION with PAYLOAD_OTHER_BIT set
+        // Use 47-bit pointer mask to preserve full Linux user-space addresses
+        let ptr = u.as_ptr() as u64 & PAYLOAD_MASK_47;
         Self {
             bits: make_tagged(TAG_FUNCTION, PAYLOAD_OTHER_BIT | ptr),
         }
@@ -227,19 +228,19 @@ impl Value {
     }
 
     /// Check if value is userdata
+    /// Note: With 47-bit pointer support, userdata is distinguished by PAYLOAD_OTHER_BIT only.
+    /// Thread support requires a different encoding (not currently implemented).
     #[inline]
     pub fn is_userdata(&self) -> bool {
-        get_tag(self.bits) == TAG_FUNCTION
-            && (self.bits & PAYLOAD_OTHER_BIT) != 0
-            && (self.bits & PAYLOAD_THREAD_BIT) == 0
+        get_tag(self.bits) == TAG_FUNCTION && (self.bits & PAYLOAD_OTHER_BIT) != 0
     }
 
     /// Check if value is a thread
+    /// Note: Thread type is not currently supported with 47-bit pointer encoding.
+    /// This always returns false for now.
     #[inline]
     pub fn is_thread(&self) -> bool {
-        get_tag(self.bits) == TAG_FUNCTION
-            && (self.bits & PAYLOAD_OTHER_BIT) != 0
-            && (self.bits & PAYLOAD_THREAD_BIT) != 0
+        false  // Thread support disabled with 47-bit pointer encoding
     }
 
     /// Check if value is light userdata
@@ -267,13 +268,12 @@ impl Value {
             TAG_STRING => LuaType::String,
             TAG_TABLE => LuaType::Table,
             TAG_FUNCTION => {
-                // Check marker bits for function vs userdata vs thread
+                // Check marker bit for function vs userdata
+                // (Thread support disabled with 47-bit pointer encoding)
                 if (self.bits & PAYLOAD_OTHER_BIT) == 0 {
                     LuaType::Function
-                } else if (self.bits & PAYLOAD_THREAD_BIT) == 0 {
-                    LuaType::Userdata
                 } else {
-                    LuaType::Thread
+                    LuaType::Userdata
                 }
             }
             _ => LuaType::Nil, // Shouldn't happen
@@ -365,10 +365,10 @@ impl Value {
         (self.bits & PAYLOAD_MASK) as *mut T
     }
 
-    /// Get pointer payload with 46-bit mask (for userdata/thread)
+    /// Get pointer payload with 47-bit mask (for userdata)
     #[inline]
-    fn get_pointer_46<T>(&self) -> *mut T {
-        (self.bits & PAYLOAD_MASK_46) as *mut T
+    fn get_pointer_47<T>(&self) -> *mut T {
+        (self.bits & PAYLOAD_MASK_47) as *mut T
     }
 
     /// Get as a string reference
@@ -405,7 +405,7 @@ impl Value {
     #[inline]
     pub fn as_userdata(&self) -> Option<GcRef<Userdata>> {
         if self.is_userdata() {
-            Some(GcRef::new(self.get_pointer_46()))
+            Some(GcRef::new(self.get_pointer_47()))
         } else {
             None
         }
@@ -646,9 +646,9 @@ impl fmt::Debug for Value {
             LuaType::String => write!(f, "string: {:p}", self.get_pointer::<LuaString>()),
             LuaType::Table => write!(f, "table: {:p}", self.get_pointer::<Table>()),
             LuaType::Function => write!(f, "function: {:p}", self.get_pointer::<Function>()),
-            LuaType::Userdata => write!(f, "userdata: {:p}", self.get_pointer_46::<Userdata>()),
+            LuaType::Userdata => write!(f, "userdata: {:p}", self.get_pointer_47::<Userdata>()),
             LuaType::LightUserdata => write!(f, "userdata: {:p}", self.get_pointer::<()>()),
-            LuaType::Thread => write!(f, "thread: {:p}", self.get_pointer_46::<()>()),
+            LuaType::Thread => write!(f, "thread: {:p}", self.get_pointer_47::<()>()),
             _ => write!(f, "unknown"),
         }
     }

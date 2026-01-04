@@ -25,6 +25,19 @@ pub struct Userdata {
 }
 
 impl Userdata {
+    /// Create a new simple proxy userdata (no inline data)
+    /// This is safe to use with gc.alloc
+    pub fn new_proxy() -> Self {
+        Self {
+            gc: GcHeader::new(7), // LuaType::Userdata
+            metatable: Cell::new(None),
+            user_values: Vec::new(),
+            type_id: TypeId::of::<()>(),
+            data_size: 0,
+            data: [],
+        }
+    }
+
     /// Get the metatable
     pub fn get_metatable(&self) -> Option<GcRef<Table>> {
         self.metatable.get()

@@ -8,6 +8,7 @@ mod string;
 mod table;
 mod io;
 mod os;
+mod debug;
 
 pub use base::register_base;
 pub use math::register_math;
@@ -15,6 +16,7 @@ pub use string::register_string;
 pub use table::register_table;
 pub use io::register_io;
 pub use os::register_os;
+pub use debug::register_debug;
 
 use crate::vm::State;
 
@@ -26,4 +28,5 @@ pub fn register_all(state: &mut State) {
     register_table(state);
     register_io(state);
     register_os(state);
+    register_debug(state);
 }

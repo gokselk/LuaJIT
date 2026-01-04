@@ -7,7 +7,7 @@ mod nanbox;
 pub mod table;
 pub mod string;
 mod function;
-mod userdata;
+pub mod userdata;
 
 pub use nanbox::Value;
 pub use table::{Table, GcHeader};

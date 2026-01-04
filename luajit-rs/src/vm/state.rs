@@ -299,15 +299,14 @@ impl State {
     }
 
     /// Call a function on the stack
+    /// Note: The value at func position doesn't need to be a function -
+    /// if it has a __call metamethod, that will be invoked instead.
     pub fn call(&mut self, nargs: usize, nresults: i32) -> LuaResult<()> {
         let func_idx = self.stack.top() - nargs - 1;
-        let func = self.stack.get(func_idx);
+        // Note: Don't check is_function() here - the interpreter handles
+        // __call metamethods for tables and userdata
 
-        if !func.is_function() {
-            return Err(LuaError::CallError(func.lua_type()));
-        }
-
-        // Run interpreter
+        // Run interpreter (it will handle metamethods for non-function values)
         let mut interp = super::Interpreter::new(self);
         interp.call(func_idx, nargs, nresults)
     }

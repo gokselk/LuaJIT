@@ -1,6 +1,6 @@
 //! Base library - core Lua functions.
 
-use crate::value::{Value, LuaError, LuaResult, LuaType};
+use crate::value::{Value, LuaError, LuaResult, LuaType, Userdata};
 use crate::vm::State;
 
 /// Register base library functions
@@ -465,27 +465,32 @@ fn lua_setmetatable(state: &mut State) -> LuaResult<usize> {
 fn lua_getmetatable(state: &mut State) -> LuaResult<usize> {
     let val = state.get_value(1);
 
-    if let Some(t) = val.as_table() {
+    // Get metatable from table or userdata
+    let mt_opt = if let Some(t) = val.as_table() {
         let t = unsafe { &*t.as_ptr() };
-        if let Some(mt) = t.get_metatable() {
-            let mt_table = unsafe { &*mt.as_ptr() };
-            // Check for __metatable field
-            let key = state.intern_string("__metatable");
-            let protected = mt_table.get(&key);
-            if !protected.is_nil() {
-                state.push(protected)?;
-            } else {
-                state.push(Value::table(mt))?;
-            }
-        } else {
-            state.push(Value::nil())?;
-        }
-        Ok(1)
+        t.get_metatable()
+    } else if let Some(u) = val.as_userdata() {
+        let u = unsafe { &*u.as_ptr() };
+        u.get_metatable()
     } else {
-        // Check type metatable
+        // Check type metatable for other types
+        None
+    };
+
+    if let Some(mt) = mt_opt {
+        let mt_table = unsafe { &*mt.as_ptr() };
+        // Check for __metatable field (protection)
+        let key = state.intern_string("__metatable");
+        let protected = mt_table.get(&key);
+        if !protected.is_nil() {
+            state.push(protected)?;
+        } else {
+            state.push(Value::table(mt))?;
+        }
+    } else {
         state.push(Value::nil())?;
-        Ok(1)
     }
+    Ok(1)
 }
 
 /// collectgarbage([opt [, arg]]) -> varies
@@ -781,9 +786,31 @@ fn lua_setfenv(_state: &mut State) -> LuaResult<usize> {
     Ok(1)
 }
 
-/// newproxy([boolean]) - stub
+/// newproxy([boolean|proxy]) - create a new proxy userdata
+/// If called with no arguments or false, creates a proxy without metatable.
+/// If called with true, creates a proxy with an empty metatable.
+/// If called with another proxy, creates a proxy sharing the same metatable.
 fn lua_newproxy(state: &mut State) -> LuaResult<usize> {
-    state.push(Value::nil())?;
+    // Allocate an empty proxy userdata using GC
+    let proxy = state.gc.alloc(Userdata::new_proxy());
+
+    // Check argument for metatable
+    if state.get_top() >= 1 {
+        let arg = state.get_value(1);
+
+        if let Some(true) = arg.as_boolean() {
+            // Create new empty metatable
+            let mt = state.create_table(0, 4);
+            unsafe { (*proxy.as_ptr()).set_metatable(Some(mt)); }
+        } else if let Some(other_proxy) = arg.as_userdata() {
+            // Share metatable with another proxy
+            let mt = unsafe { (*other_proxy.as_ptr()).get_metatable() };
+            unsafe { (*proxy.as_ptr()).set_metatable(mt); }
+        }
+        // If false or nil, no metatable (already None)
+    }
+
+    state.push(Value::userdata(proxy))?;
     Ok(1)
 }
 
