@@ -400,16 +400,16 @@ mod tests {
 
     #[test]
     fn test_upvalue_open_close() {
-        let mut value = Value::integer(42);
-        let uv = Upvalue::new_open(&mut value);
+        let mut stack = vec![Value::integer(42)];
+        let uv = Upvalue::new_open(0);
 
         assert!(uv.is_open());
-        assert_eq!(uv.get().as_integer(), Some(42));
+        assert_eq!(uv.get_from_stack(&stack).as_integer(), Some(42));
 
-        uv.set(Value::integer(100));
-        assert_eq!(value.as_integer(), Some(100));
+        uv.set_in_stack(&mut stack, Value::integer(100));
+        assert_eq!(stack[0].as_integer(), Some(100));
 
-        uv.close();
+        uv.close_with_stack(&stack);
         assert!(!uv.is_open());
         assert_eq!(uv.get().as_integer(), Some(100));
     }

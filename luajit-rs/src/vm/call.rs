@@ -38,11 +38,13 @@ pub struct CallFrame {
     pub vararg_base: Option<usize>,
     /// Number of varargs passed
     pub vararg_count: usize,
+    /// Stack slot of the function itself (where results go)
+    pub func_idx: usize,
 }
 
 impl CallFrame {
     /// Create a new Lua call frame
-    pub fn new_lua(closure: GcRef<Closure>, base: usize, num_results: i32) -> Self {
+    pub fn new_lua(closure: GcRef<Closure>, base: usize, func_idx: usize, num_results: i32) -> Self {
         Self {
             closure: Some(closure),
             pc: 0,
@@ -52,11 +54,12 @@ impl CallFrame {
             is_native: false,
             vararg_base: None,
             vararg_count: 0,
+            func_idx,
         }
     }
 
     /// Create a new native call frame
-    pub fn new_native(base: usize, num_results: i32) -> Self {
+    pub fn new_native(base: usize, func_idx: usize, num_results: i32) -> Self {
         Self {
             closure: None,
             pc: 0,
@@ -66,6 +69,7 @@ impl CallFrame {
             is_native: true,
             vararg_base: None,
             vararg_count: 0,
+            func_idx,
         }
     }
 
@@ -177,10 +181,10 @@ mod tests {
         let mut stack = CallStack::new();
         assert!(stack.is_empty());
 
-        stack.push(CallFrame::new_native(0, 1));
+        stack.push(CallFrame::new_native(0, 0, 1));
         assert_eq!(stack.depth(), 1);
 
-        stack.push(CallFrame::new_native(10, 0));
+        stack.push(CallFrame::new_native(10, 9, 0));
         assert_eq!(stack.depth(), 2);
 
         let frame = stack.pop().unwrap();

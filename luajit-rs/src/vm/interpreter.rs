@@ -102,7 +102,7 @@ impl<'a> Interpreter<'a> {
         };
 
         // Create call frame
-        let mut frame = CallFrame::new_lua(closure, base, nresults);
+        let mut frame = CallFrame::new_lua(closure, base, func_idx, nresults);
         frame.vararg_base = vararg_base;
         frame.vararg_count = vararg_count;
         frame.top = base + proto.max_stack_size as usize;
@@ -158,7 +158,7 @@ impl<'a> Interpreter<'a> {
         self.state.stack.set_top(base + nargs);
 
         // Create native frame
-        let frame = CallFrame::new_native(base, nresults);
+        let frame = CallFrame::new_native(base, func_idx, nresults);
         self.state.call_stack.push(frame);
 
         // Call the function
@@ -439,6 +439,7 @@ impl<'a> Interpreter<'a> {
             };
 
             let base = frame.base;
+            let func_idx = frame.func_idx;
             let op = instr.opcode();
             let a = instr.a() as usize;
 
@@ -919,28 +920,27 @@ impl<'a> Interpreter<'a> {
 
                 // Return operations
                 Opcode::RET0 => {
-                    // No results - set top to func_idx (base - 1) to indicate 0 results
-                    return self.do_return(base - 1, 0);
+                    // No results - set top to func_idx to indicate 0 results
+                    return self.do_return(func_idx, 0);
                 }
 
                 Opcode::RET1 => {
                     let val = self.state.stack.get(base + a);
-                    self.state.stack.set(base - 1, val);
-                    return self.do_return(base - 1, 1);
+                    self.state.stack.set(func_idx, val);
+                    return self.do_return(func_idx, 1);
                 }
 
                 Opcode::RET => {
                     let d = instr.d() as usize;
                     let nrets = d - 1;
 
-                    // Move results
-                    let dst = base - 1;
+                    // Move results to func_idx (where caller expects them)
                     for i in 0..nrets {
                         let val = self.state.stack.get(base + a + i);
-                        self.state.stack.set(dst + i, val);
+                        self.state.stack.set(func_idx + i, val);
                     }
 
-                    return self.do_return(dst, nrets);
+                    return self.do_return(func_idx, nrets);
                 }
 
                 // Loop operations
