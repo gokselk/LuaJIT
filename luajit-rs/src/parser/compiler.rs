@@ -1233,15 +1233,48 @@ impl<'a> Compiler<'a> {
             _ => return Err(LuaError::SyntaxError("expected label name after goto".to_string())),
         };
 
-        // Record the goto for later resolution
-        let pc = self.fs().current_pc();
+        let line = self.current_line();
         let block_id = self.fs().current_block_id;
         let block_level = self.fs().block_level;
+
+        // Check if this is a backwards goto (label already defined)
+        // If so, we may need to emit UCLO to close upvalues
+        let is_backwards_goto = self.fs().labels.iter()
+            .any(|(name, _, _, _, _, _)| name == &label_name);
+
+        if is_backwards_goto {
+            // Find locals that are declared after the label and are captured
+            // Find the label's local count
+            if let Some((_, label_pc, _, _, label_locals, _)) = self.fs().labels.iter()
+                .find(|(name, _, _, _, _, _)| name == &label_name)
+            {
+                let label_local_count = label_locals.len();
+                let label_pc = *label_pc;
+
+                // Get current locals that are captured and declared after the label
+                let current_locals = &self.fs().locals;
+                let has_captured_to_close = current_locals.len() > label_local_count
+                    && current_locals[label_local_count..].iter().any(|l| l.is_captured);
+
+                if has_captured_to_close {
+                    // Find the first slot that needs closing
+                    let first_slot = current_locals[label_local_count..].iter()
+                        .filter(|l| l.is_captured)
+                        .map(|l| l.slot)
+                        .min()
+                        .unwrap_or(0);
+                    // Emit UCLO before the jump
+                    self.fs_mut().emit(Instruction::adj(Opcode::UCLO, first_slot, 0), line);
+                }
+            }
+        }
+
+        // Record the goto for later resolution
+        let pc = self.fs().current_pc();
         // Store all locals with their block levels for comparison at resolve time
         let locals_with_levels: Vec<(String, usize)> = self.fs().locals.iter()
             .map(|l| (l.name.clone(), l.block_level))
             .collect();
-        let line = self.current_line();
         // Emit a placeholder jump that will be patched later
         self.fs_mut().emit(Instruction::adj(Opcode::JMP, 0, 0), line);
         self.fs_mut().pending_gotos.push((label_name.clone(), pc, block_id, block_level, locals_with_levels));
