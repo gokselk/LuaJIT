@@ -484,26 +484,316 @@ fn string_find(state: &mut State) -> LuaResult<usize> {
     Ok(0) // Not found
 }
 
+/// Lua pattern matcher
+struct PatternMatcher<'a> {
+    pattern: &'a [u8],
+    subject: &'a [u8],
+    captures: Vec<(usize, usize)>, // (start, end) indices into subject
+}
+
+impl<'a> PatternMatcher<'a> {
+    fn new(pattern: &'a [u8], subject: &'a [u8]) -> Self {
+        Self {
+            pattern,
+            subject,
+            captures: Vec::new(),
+        }
+    }
+
+    /// Check if a character matches a character class
+    fn match_class(&self, c: u8, class: u8) -> bool {
+        match class.to_ascii_lowercase() {
+            b'a' => c.is_ascii_alphabetic(),
+            b'c' => c.is_ascii_control(),
+            b'd' => c.is_ascii_digit(),
+            b'g' => c.is_ascii_graphic(),
+            b'l' => c.is_ascii_lowercase(),
+            b'p' => c.is_ascii_punctuation(),
+            b's' => c.is_ascii_whitespace(),
+            b'u' => c.is_ascii_uppercase(),
+            b'w' => c.is_ascii_alphanumeric(),
+            b'x' => c.is_ascii_hexdigit(),
+            b'z' => c == 0,
+            _ => c == class,
+        }
+    }
+
+    /// Match a single pattern element at position
+    fn match_single(&self, p_pos: usize, s_pos: usize) -> bool {
+        if s_pos >= self.subject.len() {
+            return false;
+        }
+        let c = self.subject[s_pos];
+
+        if p_pos >= self.pattern.len() {
+            return false;
+        }
+
+        match self.pattern[p_pos] {
+            b'.' => true, // Match any character
+            b'%' if p_pos + 1 < self.pattern.len() => {
+                let class = self.pattern[p_pos + 1];
+                let result = self.match_class(c, class);
+                // Uppercase means negation
+                if class.is_ascii_uppercase() { !result } else { result }
+            }
+            b'[' => self.match_bracket(p_pos, c),
+            ch => c == ch,
+        }
+    }
+
+    /// Match a bracket expression [...]
+    fn match_bracket(&self, p_pos: usize, c: u8) -> bool {
+        let mut i = p_pos + 1;
+        let mut negate = false;
+
+        if i < self.pattern.len() && self.pattern[i] == b'^' {
+            negate = true;
+            i += 1;
+        }
+
+        let mut matched = false;
+        while i < self.pattern.len() && self.pattern[i] != b']' {
+            if i + 2 < self.pattern.len() && self.pattern[i + 1] == b'-' && self.pattern[i + 2] != b']' {
+                // Range: a-z
+                if c >= self.pattern[i] && c <= self.pattern[i + 2] {
+                    matched = true;
+                }
+                i += 3;
+            } else if self.pattern[i] == b'%' && i + 1 < self.pattern.len() {
+                // Character class in bracket
+                if self.match_class(c, self.pattern[i + 1]) {
+                    matched = true;
+                }
+                i += 2;
+            } else {
+                if c == self.pattern[i] {
+                    matched = true;
+                }
+                i += 1;
+            }
+        }
+
+        if negate { !matched } else { matched }
+    }
+
+    /// Get the length of a pattern element
+    fn pattern_element_len(&self, p_pos: usize) -> usize {
+        if p_pos >= self.pattern.len() {
+            return 0;
+        }
+        match self.pattern[p_pos] {
+            b'%' => 2, // %x
+            b'[' => {
+                // Find closing ]
+                let mut i = p_pos + 1;
+                if i < self.pattern.len() && self.pattern[i] == b'^' {
+                    i += 1;
+                }
+                if i < self.pattern.len() && self.pattern[i] == b']' {
+                    i += 1; // ] at start is literal
+                }
+                while i < self.pattern.len() && self.pattern[i] != b']' {
+                    i += 1;
+                }
+                i - p_pos + 1
+            }
+            _ => 1,
+        }
+    }
+
+    /// Match pattern starting at given positions
+    fn match_here(&mut self, mut p_pos: usize, mut s_pos: usize) -> Option<usize> {
+        while p_pos < self.pattern.len() {
+            // Check for capture start
+            if self.pattern[p_pos] == b'(' {
+                let capture_start = s_pos;
+                p_pos += 1;
+
+                // Find matching close paren and match contents
+                if let Some(end_pos) = self.match_capture(p_pos, s_pos) {
+                    // Find the closing paren position in pattern
+                    let close_pos = self.find_capture_end(p_pos);
+                    self.captures.push((capture_start, end_pos));
+                    s_pos = end_pos;
+                    p_pos = close_pos + 1;
+                } else {
+                    return None;
+                }
+                continue;
+            }
+
+            // Skip closing paren (handled by capture matching)
+            if self.pattern[p_pos] == b')' {
+                p_pos += 1;
+                continue;
+            }
+
+            let elem_len = self.pattern_element_len(p_pos);
+
+            // Check for quantifier after element
+            let next_pos = p_pos + elem_len;
+            if next_pos < self.pattern.len() {
+                match self.pattern[next_pos] {
+                    b'*' => {
+                        // Zero or more (greedy)
+                        let mut count = 0;
+                        while self.match_single(p_pos, s_pos + count) {
+                            count += 1;
+                        }
+                        // Try matching rest with decreasing counts
+                        while count >= 0 {
+                            if let Some(end) = self.match_here(next_pos + 1, s_pos + count as usize) {
+                                return Some(end);
+                            }
+                            if count == 0 { break; }
+                            count -= 1;
+                        }
+                        return None;
+                    }
+                    b'+' => {
+                        // One or more (greedy)
+                        if !self.match_single(p_pos, s_pos) {
+                            return None;
+                        }
+                        let mut count = 1;
+                        while self.match_single(p_pos, s_pos + count) {
+                            count += 1;
+                        }
+                        // Try matching rest with decreasing counts
+                        while count >= 1 {
+                            if let Some(end) = self.match_here(next_pos + 1, s_pos + count) {
+                                return Some(end);
+                            }
+                            count -= 1;
+                        }
+                        return None;
+                    }
+                    b'?' => {
+                        // Zero or one
+                        if self.match_single(p_pos, s_pos) {
+                            if let Some(end) = self.match_here(next_pos + 1, s_pos + 1) {
+                                return Some(end);
+                            }
+                        }
+                        return self.match_here(next_pos + 1, s_pos);
+                    }
+                    b'-' => {
+                        // Zero or more (non-greedy)
+                        let mut count = 0;
+                        loop {
+                            if let Some(end) = self.match_here(next_pos + 1, s_pos + count) {
+                                return Some(end);
+                            }
+                            if !self.match_single(p_pos, s_pos + count) {
+                                return None;
+                            }
+                            count += 1;
+                        }
+                    }
+                    _ => {
+                        // No quantifier, match single element
+                        if !self.match_single(p_pos, s_pos) {
+                            return None;
+                        }
+                        s_pos += 1;
+                        p_pos = next_pos;
+                    }
+                }
+            } else {
+                // Last element, no quantifier
+                if !self.match_single(p_pos, s_pos) {
+                    return None;
+                }
+                s_pos += 1;
+                p_pos = next_pos;
+            }
+        }
+
+        Some(s_pos)
+    }
+
+    /// Match a capture group, returning end position in subject
+    fn match_capture(&mut self, p_pos: usize, s_pos: usize) -> Option<usize> {
+        let close_pos = self.find_capture_end(p_pos);
+        // Match the content between ( and )
+        let inner_pattern = &self.pattern[p_pos..close_pos];
+        let saved_pattern = self.pattern;
+        self.pattern = inner_pattern;
+        let result = self.match_here(0, s_pos);
+        self.pattern = saved_pattern;
+        result
+    }
+
+    /// Find the position of the closing paren for a capture
+    fn find_capture_end(&self, start: usize) -> usize {
+        let mut depth = 1;
+        let mut i = start;
+        while i < self.pattern.len() && depth > 0 {
+            match self.pattern[i] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                b'%' => i += 1, // Skip escaped char
+                _ => {}
+            }
+            i += 1;
+        }
+        i - 1 // Position of closing )
+    }
+
+    /// Try to match the pattern at any position in the subject
+    fn find_match(&mut self, start: usize) -> Option<(usize, usize)> {
+        // Check for anchor
+        let (p_start, anchored) = if !self.pattern.is_empty() && self.pattern[0] == b'^' {
+            (1, true)
+        } else {
+            (0, false)
+        };
+
+        let saved_pattern = self.pattern;
+        self.pattern = &saved_pattern[p_start..];
+
+        if anchored {
+            self.captures.clear();
+            if let Some(end) = self.match_here(0, start) {
+                self.pattern = saved_pattern;
+                return Some((start, end));
+            }
+        } else {
+            for i in start..=self.subject.len() {
+                self.captures.clear();
+                if let Some(end) = self.match_here(0, i) {
+                    self.pattern = saved_pattern;
+                    return Some((i, end));
+                }
+            }
+        }
+
+        self.pattern = saved_pattern;
+        None
+    }
+}
+
 fn string_match(state: &mut State) -> LuaResult<usize> {
     let s = state.get_value(1);
     let pattern = state.get_value(2);
     let init = state.to_integer(3).unwrap_or(1);
 
-    let s_str = if let Some(str_ref) = s.as_string() {
-        unsafe { (*str_ref.as_ptr()).as_str().unwrap_or("").to_string() }
+    let s_bytes = if let Some(str_ref) = s.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_bytes().to_vec() }
     } else {
         return Err(LuaError::ArgumentError {
-            func: "string.match".to_string(),
+            func: "match".to_string(),
             arg: 1,
             msg: "string expected".to_string(),
         });
     };
 
-    let pat_str = if let Some(str_ref) = pattern.as_string() {
-        unsafe { (*str_ref.as_ptr()).as_str().unwrap_or("").to_string() }
+    let pat_bytes = if let Some(str_ref) = pattern.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_bytes().to_vec() }
     } else {
         return Err(LuaError::ArgumentError {
-            func: "string.match".to_string(),
+            func: "match".to_string(),
             arg: 2,
             msg: "string expected".to_string(),
         });
@@ -513,24 +803,34 @@ fn string_match(state: &mut State) -> LuaResult<usize> {
     let start_idx = if init >= 1 {
         (init - 1) as usize
     } else {
-        (s_str.len() as i32 + init).max(0) as usize
+        (s_bytes.len() as i32 + init).max(0) as usize
     };
 
-    if start_idx >= s_str.len() {
+    if start_idx >= s_bytes.len() && !s_bytes.is_empty() {
         return Ok(0); // Not found
     }
 
-    let search_str = &s_str[start_idx..];
+    let mut matcher = PatternMatcher::new(&pat_bytes, &s_bytes);
 
-    // Simple literal match
-    if let Some(pos) = search_str.find(&pat_str) {
-        let matched = &search_str[pos..pos + pat_str.len()];
-        let val = state.intern_string(matched);
-        state.push(val)?;
-        return Ok(1);
+    if let Some((match_start, match_end)) = matcher.find_match(start_idx) {
+        if matcher.captures.is_empty() {
+            // No captures, return the whole match
+            let matched = &s_bytes[match_start..match_end];
+            let val = state.intern_string(std::str::from_utf8(matched).unwrap_or(""));
+            state.push(val)?;
+            Ok(1)
+        } else {
+            // Return captures
+            for (cap_start, cap_end) in &matcher.captures {
+                let captured = &s_bytes[*cap_start..*cap_end];
+                let val = state.intern_string(std::str::from_utf8(captured).unwrap_or(""));
+                state.push(val)?;
+            }
+            Ok(matcher.captures.len())
+        }
+    } else {
+        Ok(0) // Not found
     }
-
-    Ok(0) // Not found
 }
 
 fn string_gsub(state: &mut State) -> LuaResult<usize> {

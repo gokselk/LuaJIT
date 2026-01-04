@@ -76,11 +76,22 @@ pub fn register_math(state: &mut State) {
 }
 
 fn get_num(state: &State, idx: i32, func_name: &str) -> LuaResult<f64> {
-    state.to_number(idx).ok_or_else(|| LuaError::ArgumentError {
-        func: func_name.to_string(),
-        arg: idx as usize,
-        msg: "number expected".to_string(),
-    })
+    match state.to_number(idx) {
+        Some(n) => Ok(n),
+        None => {
+            let val = state.get_value(idx);
+            let got = if val.is_nil() && idx > state.get_top() as i32 {
+                "no value".to_string()
+            } else {
+                format!("{}", val.lua_type())
+            };
+            Err(LuaError::ArgumentError {
+                func: func_name.to_string(),
+                arg: idx as usize,
+                msg: format!("number expected, got {}", got),
+            })
+        }
+    }
 }
 
 fn math_abs(state: &mut State) -> LuaResult<usize> {

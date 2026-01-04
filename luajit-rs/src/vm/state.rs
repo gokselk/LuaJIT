@@ -287,7 +287,9 @@ impl State {
         }
 
         let proto = crate::parser::parse(source, chunk_name)?;
-        let proto_ref = self.allocate_proto_tree(proto);
+        let source_str = self.intern_string(chunk_name);
+        let source_ref = source_str.as_string().unwrap();
+        let proto_ref = self.allocate_proto_tree_with_source(proto, Some(source_ref));
         let closure = Closure::new(proto_ref, Some(self.globals));
         let func = Function::Lua(closure);
         Ok(self.gc.alloc(func))
@@ -296,17 +298,21 @@ impl State {
     /// Load bytecode from a binary buffer
     pub fn load_bytecode(&mut self, bytes: &[u8]) -> LuaResult<GcRef<Function>> {
         let proto = crate::stdlib::string::load_proto(bytes)?;
-        let proto_ref = self.allocate_proto_tree(proto);
+        let proto_ref = self.allocate_proto_tree_with_source(proto, None);
         let closure = Closure::new(proto_ref, Some(self.globals));
         let func = Function::Lua(closure);
         Ok(self.gc.alloc(func))
     }
 
-    /// Recursively allocate a prototype and all its child protos
-    fn allocate_proto_tree(&mut self, mut proto: Proto) -> GcRef<Proto> {
-        // Recursively allocate child protos first (bottom-up)
+    /// Recursively allocate a prototype and all its child protos with source set on main proto
+    fn allocate_proto_tree_with_source(&mut self, mut proto: Proto, source: Option<GcRef<LuaString>>) -> GcRef<Proto> {
+        // Set source on the main proto
+        if let Some(src) = source {
+            proto.source = Some(src);
+        }
+        // Recursively allocate child protos first (bottom-up), propagating source
         for child_proto in proto.child_protos.drain(..) {
-            let child_ref = self.allocate_proto_tree(*child_proto);
+            let child_ref = self.allocate_proto_tree_with_source(*child_proto, proto.source);
             proto.protos.push(child_ref);
         }
         // Now allocate this proto
@@ -425,6 +431,46 @@ impl State {
                 self.open_upvalues = uv.next.get();
             }
         }
+    }
+
+    /// Get error location string (source:line:) for current call position
+    /// Returns empty string if no Lua call is active
+    pub fn get_error_location(&self) -> String {
+        // Walk the call stack to find the first Lua frame
+        for frame in self.call_stack.frames().iter().rev() {
+            if !frame.is_native {
+                if let Some(closure_ref) = &frame.closure {
+                    let closure = unsafe { &*closure_ref.as_ptr() };
+                    let proto = unsafe { &*closure.proto.as_ptr() };
+
+                    // Get source name
+                    let source = if let Some(src_ref) = &proto.source {
+                        let src = unsafe { &*src_ref.as_ptr() };
+                        src.as_str().unwrap_or("?").to_string()
+                    } else {
+                        "?".to_string()
+                    };
+
+                    // Get line number from PC (PC points to next instruction, so use pc-1)
+                    let line = if frame.pc > 0 && frame.pc <= proto.lineinfo.len() {
+                        proto.lineinfo[frame.pc - 1]
+                    } else if !proto.lineinfo.is_empty() {
+                        proto.lineinfo[0]
+                    } else {
+                        proto.line_defined
+                    };
+
+                    return format!("{}:{}: ", source, line);
+                }
+            }
+        }
+        String::new()
+    }
+
+    /// Format an error with location info
+    pub fn format_error(&self, error: &LuaError) -> String {
+        let location = self.get_error_location();
+        format!("{}{}", location, error)
     }
 }
 
