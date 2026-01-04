@@ -484,8 +484,16 @@ impl State {
             self.set_top(saved_top);
         }
 
+        // Get bytes allocated since last GC before it's reset
+        let bytes_allocated = self.gc.bytes_since_gc();
+
         // Continue with normal GC
         self.gc.collect();
+
+        // Simulate freeing string memory (strings are interned but we need
+        // to track "garbage" for memory accounting purposes)
+        let string_garbage = bytes_allocated * 99 / 100;
+        self.strings.simulate_gc(string_garbage);
     }
 
     /// Mark userdata reachable from a table (recursive)

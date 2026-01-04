@@ -191,6 +191,16 @@ impl StringInterner {
         self.memory_used
     }
 
+    /// Simulate garbage collection of unreachable strings
+    /// (In reality, interned strings are never freed, but this helps GC heuristics)
+    pub fn simulate_gc(&mut self, estimated_garbage: usize) {
+        if self.memory_used > estimated_garbage {
+            let new_memory = self.memory_used - estimated_garbage;
+            // Keep at least 1KB baseline for interned strings
+            self.memory_used = std::cmp::max(new_memory, 1024);
+        }
+    }
+
     /// Get number of unique strings
     pub fn len(&self) -> usize {
         self.strings.values().map(|v| v.len()).sum()

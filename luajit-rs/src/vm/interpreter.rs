@@ -1325,6 +1325,8 @@ impl<'a> Interpreter<'a> {
                         match (to_concat_string(&left, &self.state), to_concat_string(&right, &self.state)) {
                             (Some(l), Some(r)) => {
                                 let result = format!("{}{}", l, r);
+                                // Track string allocation for GC
+                                self.state.gc.track_external_alloc(result.len() + 32);
                                 right = self.state.intern_string(&result);
                             }
                             _ => {

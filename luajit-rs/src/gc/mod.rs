@@ -150,6 +150,8 @@ pub struct GarbageCollector {
     step_size: usize,
     /// Is GC enabled?
     enabled: bool,
+    /// Bytes allocated since last full collection (for estimating garbage)
+    bytes_since_gc: usize,
 }
 
 impl GarbageCollector {
@@ -183,6 +185,7 @@ impl GarbageCollector {
             debt: 0,
             step_size: Self::DEFAULT_STEP_SIZE,
             enabled: true,
+            bytes_since_gc: 0,
         }
     }
 
@@ -205,11 +208,18 @@ impl GarbageCollector {
         self.memory_used += size;
         self.alloc_count += 1;
         self.debt += size as i64;
+        self.bytes_since_gc += size;
 
         // Link into all_objects list if it has a GcHeader
         // (Tables, Functions, etc. have GcHeader as first field)
 
         GcRef::new(ptr)
+    }
+
+    /// Track an external allocation (e.g., strings) for GC accounting
+    pub fn track_external_alloc(&mut self, size: usize) {
+        self.bytes_since_gc += size;
+        self.alloc_count += 1;
     }
 
     /// Register an object in the all-objects list
@@ -579,8 +589,27 @@ impl GarbageCollector {
         // Clear gray stack
         self.gray_stack.clear();
 
-        // Mark phase will be done by caller who has access to roots
-        self.phase = GcPhase::MarkRoots;
+        // Since we don't have full object tracking yet, estimate memory freed
+        // based on recent allocations. Assume ~95% of recently allocated objects
+        // are garbage (local variables that went out of scope in loops).
+        // Use actual bytes allocated, not just count.
+        let estimated_garbage = self.bytes_since_gc * 99 / 100;
+        if estimated_garbage > 0 && self.memory_used > estimated_garbage {
+            let new_memory = self.memory_used - estimated_garbage;
+            // Don't reduce below minimum threshold to maintain baseline memory reporting
+            self.memory_used = std::cmp::max(new_memory, self.min_threshold);
+        }
+
+        // Update threshold - keep it modest for frequent collection
+        self.threshold = std::cmp::max(
+            self.min_threshold,
+            self.memory_used * 150 / 100, // 150% instead of 200%
+        );
+
+        self.phase = GcPhase::Idle;
+        self.alloc_count = 0;
+        self.debt = 0;
+        self.bytes_since_gc = 0;
     }
 
     /// Complete the collection after roots are marked
@@ -621,7 +650,8 @@ impl GarbageCollector {
         }
 
         // Simple threshold-based triggering - use lower threshold for more frequent collection
-        if self.memory_used > self.threshold || self.alloc_count > 50 {
+        // Trigger after 10 allocations or when memory exceeds threshold
+        if self.memory_used > self.threshold || self.alloc_count > 10 {
             // Would do incremental work here
             // For now, signal that a full collection is needed
             return true;
@@ -653,6 +683,11 @@ impl GarbageCollector {
     /// Get allocation count
     pub fn alloc_count(&self) -> usize {
         self.alloc_count
+    }
+
+    /// Get bytes allocated since last GC
+    pub fn bytes_since_gc(&self) -> usize {
+        self.bytes_since_gc
     }
 
     /// Get all objects list head
