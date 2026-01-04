@@ -76,8 +76,9 @@ struct FunctionState {
     current_block_id: usize,
     /// Block parent map: block_id -> parent_block_id
     block_parents: Vec<usize>,
-    /// Labels: Vec of (name, PC, block_id, block_level, locals_with_levels)
-    labels: Vec<(String, usize, usize, usize, Vec<(String, usize)>)>,
+    /// Labels: Vec of (name, PC, block_id, block_level, locals_with_levels, is_trailing)
+    /// is_trailing is true if the label is at the end of a block (followed only by other labels or end)
+    labels: Vec<(String, usize, usize, usize, Vec<(String, usize)>, bool)>,
     /// Pending gotos: (name, PC of JMP instruction, block_id, block_level, locals_with_levels)
     pending_gotos: Vec<(String, usize, usize, usize, Vec<(String, usize)>)>,
 }
@@ -261,6 +262,17 @@ impl<'a> Compiler<'a> {
         self.lexer.line()
     }
 
+    /// Mark all labels in the current block as non-trailing
+    /// This is called when we parse a non-label statement
+    fn mark_labels_non_trailing(&mut self) {
+        let current_block = self.fs().current_block_id;
+        for label in &mut self.fs_mut().labels {
+            if label.2 == current_block {
+                label.5 = false; // is_trailing = false
+            }
+        }
+    }
+
     /// Compile the chunk
     pub fn compile(mut self) -> LuaResult<Proto> {
         // Add implicit _ENV upvalue
@@ -322,39 +334,62 @@ impl<'a> Compiler<'a> {
         for (label_name, goto_pc, goto_block, _goto_block_level, goto_locals) in pending_gotos {
             // Find a visible label - prefer the innermost one (highest level)
             // A label is visible if its block is an ancestor of (or same as) the goto's block
-            let mut best_match: Option<(usize, usize, Vec<(String, usize)>)> = None; // (target_pc, label_block_level, label_locals)
+            let mut best_match: Option<(usize, usize, Vec<(String, usize)>, bool)> = None; // (target_pc, label_block_level, label_locals, is_trailing)
             let mut best_level: Option<usize> = None;
 
-            for (name, target_pc, label_block, label_level, label_locals) in &labels {
+            for (name, target_pc, label_block, label_level, label_locals, is_trailing) in &labels {
                 if name == &label_name {
                     // Check if this label is visible from the goto
                     if is_visible(*label_block, goto_block) {
                         // Prefer the innermost visible label (highest level)
                         if best_level.is_none() || *label_level > best_level.unwrap() {
-                            best_match = Some((*target_pc, *label_level, label_locals.clone()));
+                            best_match = Some((*target_pc, *label_level, label_locals.clone(), *is_trailing));
                             best_level = Some(*label_level);
                         }
                     }
                 }
             }
 
-            if let Some((target_pc, label_block_level, label_locals)) = best_match {
+            if let Some((target_pc, label_block_level, label_locals, is_trailing)) = best_match {
                 // For forward gotos, check if we're jumping into variable scope
                 // Filter both goto and label locals to only those visible at the label's block level
                 let goto_visible_count = goto_locals.iter()
                     .filter(|(_, lvl)| *lvl <= label_block_level)
                     .count();
-                let label_visible_count = label_locals.iter()
-                    .filter(|(_, lvl)| *lvl <= label_block_level)
-                    .count();
 
-                if target_pc > goto_pc && label_visible_count > goto_visible_count {
-                    // Find the first local declared after the goto's visible locals
-                    // This is the local at position goto_visible_count in the filtered label locals
-                    let label_visible: Vec<_> = label_locals.iter()
+                // For trailing labels, don't count locals at the label's exact block level
+                // (they will be going out of scope at the end of the block anyway)
+                let label_visible_count = if is_trailing {
+                    label_locals.iter()
+                        .filter(|(_, lvl)| *lvl < label_block_level)
+                        .count()
+                } else {
+                    label_locals.iter()
                         .filter(|(_, lvl)| *lvl <= label_block_level)
-                        .collect();
-                    if let Some((local_name, _)) = label_visible.get(goto_visible_count) {
+                        .count()
+                };
+
+                // Similarly filter goto locals for trailing labels
+                let goto_visible_for_check = if is_trailing {
+                    goto_locals.iter()
+                        .filter(|(_, lvl)| *lvl < label_block_level)
+                        .count()
+                } else {
+                    goto_visible_count
+                };
+
+                if target_pc > goto_pc && label_visible_count > goto_visible_for_check {
+                    // Find the first local declared after the goto's visible locals
+                    let label_visible: Vec<_> = if is_trailing {
+                        label_locals.iter()
+                            .filter(|(_, lvl)| *lvl < label_block_level)
+                            .collect()
+                    } else {
+                        label_locals.iter()
+                            .filter(|(_, lvl)| *lvl <= label_block_level)
+                            .collect()
+                    };
+                    if let Some((local_name, _)) = label_visible.get(goto_visible_for_check) {
                         return Err(LuaError::SyntaxError(format!(
                             "<goto {}> at line ? jumps into the scope of local '{}'",
                             label_name, local_name
@@ -445,28 +480,30 @@ impl<'a> Compiler<'a> {
             TokenKind::Semicolon => {
                 self.lexer.next()?;
             }
-            TokenKind::If => self.parse_if()?,
-            TokenKind::While => self.parse_while()?,
-            TokenKind::Do => self.parse_do()?,
-            TokenKind::For => self.parse_for()?,
-            TokenKind::Repeat => self.parse_repeat()?,
-            TokenKind::Function => self.parse_function_stat()?,
-            TokenKind::Local => self.parse_local()?,
-            TokenKind::Return => self.parse_return()?,
-            TokenKind::Break => self.parse_break()?,
+            TokenKind::If => { self.mark_labels_non_trailing(); self.parse_if()?; }
+            TokenKind::While => { self.mark_labels_non_trailing(); self.parse_while()?; }
+            TokenKind::Do => { self.mark_labels_non_trailing(); self.parse_do()?; }
+            TokenKind::For => { self.mark_labels_non_trailing(); self.parse_for()?; }
+            TokenKind::Repeat => { self.mark_labels_non_trailing(); self.parse_repeat()?; }
+            TokenKind::Function => { self.mark_labels_non_trailing(); self.parse_function_stat()?; }
+            TokenKind::Local => { self.mark_labels_non_trailing(); self.parse_local()?; }
+            TokenKind::Return => { self.mark_labels_non_trailing(); self.parse_return()?; }
+            TokenKind::Break => { self.mark_labels_non_trailing(); self.parse_break()?; }
             TokenKind::Goto => {
                 // In LuaJIT mode, 'goto' can be used as an identifier
                 // Check if followed by '=' or ',' (assignment/multi-assign)
                 let next = self.lexer.peek_second()?;
                 if matches!(next.kind, TokenKind::Eq | TokenKind::Comma) {
                     // Treat as identifier - parse as expression statement
+                    self.mark_labels_non_trailing();
                     self.parse_expr_stat()?
                 } else {
+                    // Regular goto - don't mark labels as non-trailing
                     self.parse_goto()?
                 }
             }
             TokenKind::ColonColon => self.parse_label()?,
-            _ => self.parse_expr_stat()?,
+            _ => { self.mark_labels_non_trailing(); self.parse_expr_stat()?; }
         }
         Ok(())
     }
@@ -806,7 +843,15 @@ impl<'a> Compiler<'a> {
         let saved_loop = self.fs_mut().loop_start;
         self.fs_mut().loop_start = Some(loop_start);
 
+        // Track the block ID that will be created by parse_block
+        let repeat_block_id = self.fs().next_block_id;
         self.parse_block()?;
+        // Mark labels in the repeat block as non-trailing because the 'until' condition is in scope
+        for label in &mut self.fs_mut().labels {
+            if label.2 == repeat_block_id {
+                label.5 = false; // is_trailing = false
+            }
+        }
         self.lexer.expect(TokenKind::Until)?;
 
         // Parse condition
@@ -1220,7 +1265,7 @@ impl<'a> Compiler<'a> {
             .collect();
 
         // Check for duplicate label at the same block
-        for (name, _, id, _, _) in &self.fs().labels {
+        for (name, _, id, _, _, _) in &self.fs().labels {
             if name == &label_name && *id == block_id {
                 return Err(LuaError::SyntaxError(format!(
                     "label '{}' already defined", label_name
@@ -1228,9 +1273,10 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        // Record the label location with block ID, level, and locals
+        // Record the label location with block ID, level, locals, and is_trailing=true
+        // Labels start as trailing; they get marked non-trailing if followed by non-label statements
         let pc = self.fs().current_pc();
-        self.fs_mut().labels.push((label_name, pc, block_id, block_level, locals_with_levels));
+        self.fs_mut().labels.push((label_name, pc, block_id, block_level, locals_with_levels, true));
         Ok(())
     }
 
