@@ -45,7 +45,9 @@ fn string_byte(state: &mut State) -> LuaResult<usize> {
         let len = bytes.len() as i32;
 
         let start = if i >= 0 { i - 1 } else { len + i }.max(0) as usize;
-        let end = if j >= 0 { j } else { len + j + 1 }.min(len) as usize;
+        // Clamp end to 0 before casting to usize to avoid wrapping
+        let end_i32 = if j >= 0 { j } else { len + j + 1 }.min(len).max(0);
+        let end = end_i32 as usize;
 
         if start < end && start < bytes.len() {
             for byte in &bytes[start..end.min(bytes.len())] {

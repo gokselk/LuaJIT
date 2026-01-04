@@ -2665,6 +2665,9 @@ impl<'a> Compiler<'a> {
         // Swap to new function
         self.functions.push(new_fs);
 
+        // Clear call_target_hint - it shouldn't carry over to nested functions
+        self.call_target_hint = None;
+
         // Parse body
         self.parse_block()?;
         self.lexer.expect(TokenKind::End)?;
