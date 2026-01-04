@@ -2,11 +2,11 @@
 
 use super::{Stack, CallStack, CallFrame};
 use crate::value::{
-    Value, LuaResult, LuaError, GcRef, LuaString, Table, Function, Closure, Proto, Upvalue,
+    Value, LuaResult, LuaError, GcRef, LuaString, Table, Function, Closure, Proto, Upvalue, Userdata,
 };
 use crate::value::string::StringInterner;
 use crate::gc::GarbageCollector;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The main Lua state
 pub struct State {
@@ -52,6 +52,10 @@ pub struct State {
     pub call_name: Option<String>,
     /// How the called value was accessed (for __call metamethod debug info)
     pub call_name_what: Option<String>,
+    /// List of userdata with __gc finalizers (tracked as raw pointers for weak ref semantics)
+    pub finalizable_userdata: Vec<*mut Userdata>,
+    /// Current GC trigger context (e.g., "__concat" when GC is triggered during CAT)
+    pub gc_trigger_context: Option<String>,
 }
 
 /// Thread/coroutine status
@@ -96,6 +100,8 @@ impl State {
             current_metamethod: None,
             call_name: None,
             call_name_what: None,
+            finalizable_userdata: Vec::new(),
+            gc_trigger_context: None,
         };
 
         // Initialize standard globals
@@ -310,7 +316,16 @@ impl State {
 
     /// Create a new table
     pub fn create_table(&mut self, narr: usize, nrec: usize) -> GcRef<Table> {
-        self.gc.alloc(Table::with_capacity(narr, nrec))
+        let table = self.gc.alloc(Table::with_capacity(narr, nrec));
+        self.check_gc();
+        table
+    }
+
+    /// Check if GC should run and run it if needed
+    pub fn check_gc(&mut self) {
+        if self.gc.step(0) {
+            self.collect_garbage();
+        }
     }
 
     /// Push a new table onto the stack
@@ -397,7 +412,120 @@ impl State {
 
     /// Run garbage collection
     pub fn collect_garbage(&mut self) {
+        // First, collect all roots for marking
+        let mut reachable: HashSet<*mut Userdata> = HashSet::new();
+
+        // Mark userdata on the stack
+        for i in 0..self.stack.len() {
+            let val = self.stack.get(i);
+            if let Some(ud) = val.as_userdata() {
+                reachable.insert(ud.as_ptr());
+            }
+        }
+
+        // Mark userdata in globals
+        self.mark_table_userdata(self.globals, &mut reachable);
+
+        // Mark userdata in registry
+        self.mark_table_userdata(self.registry, &mut reachable);
+
+        // Find unreachable finalizable userdata
+        // Intern the __gc key before the loop
+        let gc_key = self.intern_string("__gc");
+
+        let mut to_finalize: Vec<(*mut Userdata, Value)> = Vec::new();
+        let mut keep: Vec<*mut Userdata> = Vec::new();
+
+        for &ptr in &self.finalizable_userdata {
+            if reachable.contains(&ptr) {
+                keep.push(ptr);
+            } else {
+                // Check for __gc and queue for finalization
+                let ud = unsafe { &*ptr };
+                if let Some(mt) = ud.get_metatable() {
+                    let gc_fn = unsafe { (*mt.as_ptr()).get(&gc_key) };
+                    if gc_fn.is_function() {
+                        to_finalize.push((ptr, gc_fn));
+                    }
+                }
+            }
+        }
+
+        self.finalizable_userdata = keep;
+
+        // Run finalizers
+        for (ud_ptr, gc_fn) in to_finalize {
+            // Save current stack
+            let saved_top = self.get_top();
+
+            // Set metamethod tracking for debug info
+            // Use gc_trigger_context if available, otherwise default to "__gc"
+            let mm_name = self.gc_trigger_context.clone().unwrap_or_else(|| "__gc".to_string());
+            self.current_metamethod = Some(mm_name);
+
+            // Push finalizer and userdata
+            if self.push(gc_fn).is_err() {
+                self.current_metamethod = None;
+                continue;
+            }
+            if self.push(Value::userdata(GcRef::new(ud_ptr))).is_err() {
+                self.current_metamethod = None;
+                self.set_top(saved_top);
+                continue;
+            }
+
+            // Call finalizer with pcall semantics (don't propagate errors)
+            let _ = self.pcall(1, 0);
+
+            // Clear metamethod tracking
+            self.current_metamethod = None;
+
+            // Restore stack
+            self.set_top(saved_top);
+        }
+
+        // Continue with normal GC
         self.gc.collect();
+    }
+
+    /// Mark userdata reachable from a table (recursive)
+    fn mark_table_userdata(&self, table: GcRef<Table>, reachable: &mut HashSet<*mut Userdata>) {
+        let t = unsafe { &*table.as_ptr() };
+        for (key, value) in t.iter() {
+            self.mark_value_userdata(&key, reachable);
+            self.mark_value_userdata(&value, reachable);
+        }
+        // Also check metatable
+        if let Some(mt) = t.get_metatable() {
+            self.mark_table_userdata(mt, reachable);
+        }
+    }
+
+    /// Mark userdata reachable from a value
+    fn mark_value_userdata(&self, value: &Value, reachable: &mut HashSet<*mut Userdata>) {
+        if let Some(ud) = value.as_userdata() {
+            reachable.insert(ud.as_ptr());
+        } else if let Some(t) = value.as_table() {
+            // Only recurse if not already visited (prevent infinite loops)
+            // For simplicity, we just scan tables found in immediate values
+            let table = unsafe { &*t.as_ptr() };
+            for (k, v) in table.iter() {
+                if let Some(ud) = k.as_userdata() {
+                    reachable.insert(ud.as_ptr());
+                }
+                if let Some(ud) = v.as_userdata() {
+                    reachable.insert(ud.as_ptr());
+                }
+            }
+        }
+    }
+
+    /// Register a userdata for finalization (called when __gc is set)
+    pub fn register_finalizable(&mut self, ud: GcRef<Userdata>) {
+        let ptr = ud.as_ptr();
+        if !self.finalizable_userdata.contains(&ptr) {
+            self.finalizable_userdata.push(ptr);
+        }
     }
 
     /// Get memory used

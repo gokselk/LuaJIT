@@ -93,6 +93,10 @@ fn debug_setmetatable(state: &mut State) -> LuaResult<usize> {
     } else if let Some(u) = val.as_userdata() {
         let userdata = unsafe { &*u.as_ptr() };
         userdata.set_metatable(new_mt);
+        // Register for finalization if setting a metatable
+        if new_mt.is_some() {
+            state.register_finalizable(u);
+        }
     } else {
         // Set type metatable for primitive types
         let type_index = val.lua_type() as usize;

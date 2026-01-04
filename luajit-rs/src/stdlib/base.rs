@@ -1,6 +1,6 @@
 //! Base library - core Lua functions.
 
-use crate::value::{Value, LuaError, LuaResult, LuaType, Userdata};
+use crate::value::{Value, LuaError, LuaResult, LuaType, Userdata, Table};
 use crate::vm::State;
 
 /// Register base library functions
@@ -857,15 +857,19 @@ fn lua_newproxy(state: &mut State) -> LuaResult<usize> {
         let arg = state.get_value(1);
 
         if let Some(true) = arg.as_boolean() {
-            // Create new empty metatable
-            let mt = state.create_table(0, 4);
+            // Create metatable FIRST, set it, THEN register for finalization
+            // This ensures the metatable exists when GC checks for __gc
+            let mt = state.gc.alloc(Table::with_capacity(0, 4));
             unsafe { (*proxy.as_ptr()).set_metatable(Some(mt)); }
+            state.register_finalizable(proxy);
         } else if let Some(other_proxy) = arg.as_userdata() {
             // Share metatable with another proxy
             let mt = unsafe { (*other_proxy.as_ptr()).get_metatable() };
             unsafe { (*proxy.as_ptr()).set_metatable(mt); }
+            if mt.is_some() {
+                state.register_finalizable(proxy);
+            }
         }
-        // If false or nil, no metatable (already None)
     }
 
     state.push(Value::userdata(proxy))?;

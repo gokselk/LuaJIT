@@ -911,6 +911,8 @@ impl<'a> Interpreter<'a> {
                     let hsize = d >> 11;
                     let table = self.state.gc.alloc(Table::with_capacity(asize, hsize));
                     self.state.stack.set(base + a, Value::table(table));
+                    // Check if GC should run after allocation
+                    self.state.check_gc();
                 }
 
                 Opcode::TGETV => {
@@ -1347,6 +1349,11 @@ impl<'a> Interpreter<'a> {
                         }
                     }
                     self.state.stack.set(base + a, right);
+                    // Check if GC should run after string allocation
+                    // Set context so __gc debug info shows "__concat"
+                    self.state.gc_trigger_context = Some("__concat".to_string());
+                    self.state.check_gc();
+                    self.state.gc_trigger_context = None;
                 }
 
                 // Vararg
@@ -1422,6 +1429,8 @@ impl<'a> Interpreter<'a> {
                             let func = Function::Lua(new_closure);
                             let func_ref = self.state.gc.alloc(func);
                             self.state.stack.set(base + a, Value::function(func_ref));
+                            // Check if GC should run after allocation
+                            self.state.check_gc();
                         }
                     }
                 }
