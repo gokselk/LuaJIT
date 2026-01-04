@@ -412,21 +412,113 @@ impl State {
 
     /// Run garbage collection
     pub fn collect_garbage(&mut self) {
-        // First, collect userdata reachability for finalization
-        let mut reachable_ud: HashSet<*mut Userdata> = HashSet::new();
+        // === PHASE 1: Mark and sweep strings FIRST ===
+        // This must happen before finalizers run, as finalizers may create strings
+        self.strings.begin_gc();
+        let mut visited_tables: HashSet<usize> = HashSet::new();
 
-        // Mark userdata on the stack
+        // Mark strings on the stack
         for i in 0..self.stack.len() {
             let val = self.stack.get(i);
-            if let Some(ud) = val.as_userdata() {
-                reachable_ud.insert(ud.as_ptr());
-            }
+            self.mark_value_strings(val, &mut visited_tables);
         }
 
-        // Mark userdata in globals
-        self.mark_table_userdata(self.globals, &mut reachable_ud);
+        // Mark strings in globals and registry
+        self.mark_table_strings(self.globals, &mut visited_tables);
+        self.mark_table_strings(self.registry, &mut visited_tables);
 
-        // Mark userdata in registry
+        // Collect upvalue values first (to avoid borrow issues)
+        let mut upvalue_values: Vec<Value> = Vec::new();
+        for frame in self.call_stack.frames() {
+            if let Some(ref closure) = frame.closure {
+                let closure_obj = unsafe { &*closure.as_ptr() };
+                for uv in &closure_obj.upvalues {
+                    let upval = unsafe { &*uv.as_ptr() };
+                    if !upval.is_open() {
+                        upvalue_values.push(upval.get());
+                    }
+                }
+                // Also mark proto constant strings
+                let proto = unsafe { &*closure_obj.proto.as_ptr() };
+                for constant in &proto.constants {
+                    if let Some(s) = constant.as_string() {
+                        self.strings.mark(s.as_ptr());
+                    }
+                }
+            }
+        }
+        for val in upvalue_values {
+            self.mark_value_strings(val, &mut visited_tables);
+        }
+
+        // Mark strings in open upvalues
+        let mut uv_opt = self.open_upvalues;
+        while let Some(uv_ref) = uv_opt {
+            let uv = unsafe { &*uv_ref.as_ptr() };
+            if !uv.is_open() {
+                if let Some(s) = uv.get().as_string() {
+                    self.strings.mark(s.as_ptr());
+                }
+            }
+            uv_opt = uv.next.get();
+        }
+
+        // Mark strings in type metatables (metamethod names like "__gc", "__add", etc.)
+        // Collect first to avoid borrow issues
+        let mts: Vec<GcRef<Table>> = self.metatables.iter().filter_map(|x| *x).collect();
+        for mt in mts {
+            self.mark_table_strings(mt, &mut visited_tables);
+        }
+
+        // Mark strings in error handler
+        let error_handler = self.error_handler;
+        if let Some(eh) = error_handler {
+            self.mark_function_strings(eh, &mut visited_tables);
+        }
+
+        // Mark strings in hook function
+        let hook = self.hook;
+        if let Some(h) = hook {
+            self.mark_function_strings(h, &mut visited_tables);
+        }
+
+        // Sweep unreachable strings
+        self.strings.sweep();
+
+        // === PHASE 2: Handle userdata finalization ===
+        let mut reachable_ud: HashSet<*mut Userdata> = HashSet::new();
+
+        // For userdata tracking, we need to scan the entire stack
+        // but only consider values within active call frames as reachable.
+        // Values in "dead" stack regions (between frame tops and next base)
+        // are stale temporaries and should not be considered reachable.
+
+        // Collect the live ranges from all call frames
+        let mut live_ranges: Vec<(usize, usize)> = Vec::new();
+        for frame in self.call_stack.frames() {
+            // Each frame's live range is base..top
+            if frame.top > frame.base {
+                live_ranges.push((frame.base, frame.top));
+            }
+        }
+        // Also include current stack frame
+        let current_base = self.stack.base();
+        let current_top = self.stack.top();
+        if current_top > current_base {
+            live_ranges.push((current_base, current_top));
+        }
+
+        for i in 0..self.stack.top() {
+            let val = self.stack.get(i);
+            if let Some(ud) = val.as_userdata() {
+                // Check if this slot is in a live range
+                let in_live_range = live_ranges.iter().any(|&(start, end)| i >= start && i < end);
+                if in_live_range {
+                    reachable_ud.insert(ud.as_ptr());
+                }
+            }
+        }
+        self.mark_table_userdata(self.globals, &mut reachable_ud);
         self.mark_table_userdata(self.registry, &mut reachable_ud);
 
         // Find unreachable finalizable userdata
@@ -447,12 +539,12 @@ impl State {
                 }
             }
         }
-
         self.finalizable_userdata = keep;
 
-        // Run finalizers
+        // Run finalizers (after string sweep, so new strings aren't immediately collected)
         for (ud_ptr, gc_fn) in to_finalize {
             let saved_top = self.get_top();
+            // Use the GC trigger context if set (e.g., "__concat"), otherwise "__gc"
             let mm_name = self.gc_trigger_context.clone().unwrap_or_else(|| "__gc".to_string());
             self.current_metamethod = Some(mm_name);
 
@@ -466,16 +558,119 @@ impl State {
             self.set_top(saved_top);
         }
 
-        // Get bytes allocated since last GC for string simulation
-        let bytes_allocated = self.gc.bytes_since_gc();
-
-        // Run GC collection (updates memory accounting)
+        // === PHASE 3: GC collection for other objects ===
         self.gc.collect();
+    }
 
-        // Simulate freeing string memory (strings are interned and never
-        // actually freed, but we reduce the accounting for memory heuristics)
-        let string_garbage = bytes_allocated * 99 / 100;
-        self.strings.simulate_gc(string_garbage);
+    /// Mark strings reachable from a value
+    fn mark_value_strings(&mut self, value: Value, visited_tables: &mut HashSet<usize>) {
+        if let Some(s) = value.as_string() {
+            self.strings.mark(s.as_ptr());
+        } else if let Some(t) = value.as_table() {
+            self.mark_table_strings(t, visited_tables);
+        } else if let Some(f) = value.as_function() {
+            self.mark_function_strings(f, visited_tables);
+        } else if let Some(ud) = value.as_userdata() {
+            // Mark strings in userdata metatable
+            let ud_ref = unsafe { &*ud.as_ptr() };
+            if let Some(mt) = ud_ref.get_metatable() {
+                self.mark_table_strings(mt, visited_tables);
+            }
+        }
+    }
+
+    /// Mark strings reachable from a function and its proto
+    fn mark_function_strings(&mut self, func_ref: GcRef<Function>, visited_tables: &mut HashSet<usize>) {
+        let func = unsafe { &*func_ref.as_ptr() };
+
+        // Collect data first to avoid borrow conflicts
+        let (proto_ref, env_ref, upvalue_values, native_values): (
+            Option<GcRef<Proto>>,
+            Option<GcRef<Table>>,
+            Vec<Value>,
+            Vec<Value>
+        ) = match func {
+            Function::Lua(closure) => {
+                let mut uv_vals = Vec::new();
+                for uv in &closure.upvalues {
+                    let upval = unsafe { &*uv.as_ptr() };
+                    if !upval.is_open() {
+                        uv_vals.push(upval.get());
+                    }
+                }
+                (Some(closure.proto), closure.env, uv_vals, Vec::new())
+            }
+            Function::Native(native) => {
+                (None, None, Vec::new(), native.upvalues.to_vec())
+            }
+        };
+
+        // Now mark using collected data
+        if let Some(proto) = proto_ref {
+            self.mark_proto_strings(proto, visited_tables);
+        }
+
+        if let Some(env) = env_ref {
+            self.mark_table_strings(env, visited_tables);
+        }
+
+        for val in upvalue_values {
+            self.mark_value_strings(val, visited_tables);
+        }
+
+        for val in native_values {
+            self.mark_value_strings(val, visited_tables);
+        }
+    }
+
+    /// Mark all strings in a Proto and its nested protos
+    fn mark_proto_strings(&mut self, proto_ref: GcRef<Proto>, visited_tables: &mut HashSet<usize>) {
+        let proto = unsafe { &*proto_ref.as_ptr() };
+
+        // Mark source string
+        if let Some(src) = proto.source {
+            self.strings.mark(src.as_ptr());
+        }
+
+        // Mark upvalue names
+        for name_opt in &proto.upvalue_names {
+            if let Some(name) = name_opt {
+                self.strings.mark(name.as_ptr());
+            }
+        }
+
+        // Mark strings in constants
+        for constant in &proto.constants {
+            if let Some(s) = constant.as_string() {
+                self.strings.mark(s.as_ptr());
+            } else if let Some(t) = constant.as_table() {
+                self.mark_table_strings(t, visited_tables);
+            } else if let Some(f) = constant.as_function() {
+                self.mark_function_strings(f, visited_tables);
+            }
+        }
+
+        // Mark nested protos recursively
+        for nested in &proto.protos {
+            self.mark_proto_strings(*nested, visited_tables);
+        }
+    }
+
+    /// Mark strings reachable from a table
+    fn mark_table_strings(&mut self, table: GcRef<Table>, visited_tables: &mut HashSet<usize>) {
+        let ptr = table.as_ptr() as usize;
+        if !visited_tables.insert(ptr) {
+            return; // Already visited
+        }
+
+        let t = unsafe { &*table.as_ptr() };
+        for (key, value) in t.iter() {
+            self.mark_value_strings(key, visited_tables);
+            self.mark_value_strings(value, visited_tables);
+        }
+        if let Some(mt) = t.get_metatable() {
+            self.mark_table_strings(mt, visited_tables);
+        }
     }
 
     /// Mark userdata reachable from a table (recursive)

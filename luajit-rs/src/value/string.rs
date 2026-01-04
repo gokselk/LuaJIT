@@ -7,6 +7,7 @@
 use super::GcHeader;
 use std::hash::{Hash, Hasher};
 use std::fmt;
+use std::collections::HashSet;
 use rustc_hash::FxHasher;
 
 /// An interned Lua string.
@@ -113,6 +114,10 @@ pub struct StringInterner {
     strings: hashbrown::HashMap<u64, Vec<*mut LuaString>, rustc_hash::FxBuildHasher>,
     /// Total memory used by strings
     memory_used: usize,
+    /// Strings marked as reachable during current GC cycle
+    marked: HashSet<*mut LuaString>,
+    /// Whether a GC cycle is in progress
+    gc_in_progress: bool,
 }
 
 impl StringInterner {
@@ -121,6 +126,8 @@ impl StringInterner {
         Self {
             strings: hashbrown::HashMap::with_hasher(rustc_hash::FxBuildHasher),
             memory_used: 0,
+            marked: HashSet::new(),
+            gc_in_progress: false,
         }
     }
 
@@ -191,14 +198,59 @@ impl StringInterner {
         self.memory_used
     }
 
-    /// Simulate garbage collection of unreachable strings
-    /// (In reality, interned strings are never freed, but this helps GC heuristics)
-    pub fn simulate_gc(&mut self, estimated_garbage: usize) {
-        if self.memory_used > estimated_garbage {
-            let new_memory = self.memory_used - estimated_garbage;
-            // Keep at least 1KB baseline for interned strings
-            self.memory_used = std::cmp::max(new_memory, 1024);
+    /// Begin a GC cycle - clear all marks
+    pub fn begin_gc(&mut self) {
+        self.marked.clear();
+        self.gc_in_progress = true;
+    }
+
+    /// Mark a string as reachable
+    pub fn mark(&mut self, ptr: *mut LuaString) {
+        if !ptr.is_null() {
+            self.marked.insert(ptr);
         }
+    }
+
+    /// Sweep unmarked strings - free unreachable strings and return bytes freed
+    pub fn sweep(&mut self) -> usize {
+        if !self.gc_in_progress {
+            return 0;
+        }
+
+        let mut freed = 0;
+
+        // Iterate through all buckets and remove unmarked strings
+        self.strings.retain(|_hash, bucket| {
+            bucket.retain(|&ptr| {
+                if self.marked.contains(&ptr) {
+                    true // Keep marked strings
+                } else {
+                    // Free unmarked string
+                    unsafe {
+                        let s = &*ptr;
+                        let header_size = std::mem::size_of::<LuaString>();
+                        let total_size = header_size + s.len() + 1;
+                        freed += total_size;
+
+                        let layout = std::alloc::Layout::from_size_align(total_size, 8).unwrap();
+                        std::alloc::dealloc(ptr as *mut u8, layout);
+                    }
+                    false // Remove from bucket
+                }
+            });
+            !bucket.is_empty() // Remove empty buckets
+        });
+
+        self.memory_used = self.memory_used.saturating_sub(freed);
+        self.marked.clear();
+        self.gc_in_progress = false;
+
+        freed
+    }
+
+    /// Check if a string is marked (for debugging)
+    pub fn is_marked(&self, ptr: *mut LuaString) -> bool {
+        self.marked.contains(&ptr)
     }
 
     /// Get number of unique strings
