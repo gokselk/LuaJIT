@@ -115,6 +115,13 @@ impl Table {
         }
     }
 
+    /// Clear all entries from the table
+    pub fn clear(&self) {
+        self.array.borrow_mut().clear();
+        self.hash.borrow_mut().clear();
+        self.cached_len.set(Some(0));
+    }
+
     /// Get a value from the table
     pub fn get(&self, key: &Value) -> Value {
         // Fast path for integer keys in array range

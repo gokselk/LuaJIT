@@ -32,7 +32,6 @@ pub fn register_base(state: &mut State) {
     state.register_function("getfenv", lua_getfenv);
     state.register_function("setfenv", lua_setfenv);
     state.register_function("newproxy", lua_newproxy);
-    state.register_function("require", lua_require);
     state.register_function("module", lua_module);
 
     // Add _G (self-reference to globals table)
@@ -42,14 +41,6 @@ pub fn register_base(state: &mut State) {
     // Add _VERSION
     let version = state.intern_string("Lua 5.1");
     state.set_global("_VERSION", version);
-
-    // Add package table (stub)
-    let package = state.create_table(0, 8);
-    state.set_global("package", Value::table(package));
-
-    // Add debug table (stub)
-    let debug = state.create_table(0, 8);
-    state.set_global("debug", Value::table(debug));
 
     // Add coroutine table (stub)
     let coroutine = state.create_table(0, 8);
@@ -812,11 +803,6 @@ fn lua_newproxy(state: &mut State) -> LuaResult<usize> {
 
     state.push(Value::userdata(proxy))?;
     Ok(1)
-}
-
-/// require(modname) - stub
-fn lua_require(_state: &mut State) -> LuaResult<usize> {
-    Err(LuaError::RuntimeError("require not yet implemented".to_string()))
 }
 
 /// module(name, ...) - stub
