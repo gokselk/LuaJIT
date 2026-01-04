@@ -34,6 +34,9 @@ impl<'a> Interpreter<'a> {
             None => {
                 // Try __call metamethod
                 if let Some(mm) = self.get_metamethod(&func, "__call") {
+                    // Get the name of the called value before shifting
+                    let (name, name_what) = self.get_value_name(func_idx);
+
                     // Shift arguments right to make room for the object as first arg
                     // Stack layout before: [obj, arg1, arg2, ...]
                     // Stack layout after: [mm, obj, arg1, arg2, ...]
@@ -42,8 +45,19 @@ impl<'a> Interpreter<'a> {
                         self.state.stack.set(func_idx + i + 1, val);
                     }
                     self.state.stack.set(func_idx, mm);
+
+                    // Track the call name for debug.getinfo
+                    self.state.call_name = name;
+                    self.state.call_name_what = name_what;
+
                     // Now call with nargs+1 arguments (the original object + original args)
-                    return self.call(func_idx, nargs + 1, nresults);
+                    let result = self.call(func_idx, nargs + 1, nresults);
+
+                    // Clear the call name
+                    self.state.call_name = None;
+                    self.state.call_name_what = None;
+
+                    return result;
                 }
                 Err(LuaError::CallError(func.lua_type()))
             },
@@ -247,8 +261,108 @@ impl<'a> Interpreter<'a> {
         None
     }
 
+    /// Get the name and namewhat for a value at a given slot based on bytecode analysis
+    /// Returns (name, namewhat) if found, or (None, None) if not determinable
+    fn get_value_name(&self, slot: usize) -> (Option<String>, Option<String>) {
+        // Get the current frame to analyze the bytecode
+        let frame = match self.state.call_stack.current() {
+            Some(f) => f,
+            None => return (None, None),
+        };
+
+        let closure = match frame.closure {
+            Some(c) => c,
+            None => return (None, None),
+        };
+
+        let proto = unsafe { &*(*closure.as_ptr()).proto.as_ptr() };
+        let pc = frame.pc;
+
+        // Adjust slot relative to frame base
+        let frame_base = self.state.stack.base();
+        let relative_slot = if slot >= frame_base {
+            (slot - frame_base) as u8
+        } else {
+            return (None, None);
+        };
+
+        // First, check if the slot is a named local variable at the current PC
+        for locvar in &proto.locvars {
+            if locvar.slot == relative_slot {
+                let start = locvar.start_pc as usize;
+                let end = locvar.end_pc as usize;
+                if start <= pc && pc <= end {
+                    eprintln!("DEBUG FOUND: {} at slot {}", locvar.name, locvar.slot);
+                    return (Some(locvar.name.clone()), Some("local".to_string()));
+                }
+            }
+        }
+
+        // Look for the instruction that put the value in this slot
+        // Search backward from current PC
+        for i in (0..pc).rev() {
+            let instr = proto.code[i];
+            let a = instr.a();
+
+            // Check if this instruction writes to our slot
+            if a != relative_slot {
+                continue;
+            }
+
+            match instr.opcode() {
+                // MOV from another register - check if that register is a known local
+                Opcode::MOV => {
+                    let d = instr.d() as u8;
+                    // Check if source is a named local at this PC
+                    for locvar in &proto.locvars {
+                        if locvar.slot == d {
+                            let start = locvar.start_pc as usize;
+                            let end = locvar.end_pc as usize;
+                            if start <= i && i <= end {
+                                return (Some(locvar.name.clone()), Some("local".to_string()));
+                            }
+                        }
+                    }
+                    // MOV but source not a named local - stop searching
+                    break;
+                }
+                // GGET - global get
+                Opcode::GGET => {
+                    let d = instr.d() as usize;
+                    if let Some(bytes) = frame.get_string_constant(d) {
+                        if let Ok(name) = std::str::from_utf8(bytes) {
+                            return (Some(name.to_string()), Some("global".to_string()));
+                        }
+                    }
+                    break;
+                }
+                // TGETS - field access
+                Opcode::TGETS => {
+                    let c = instr.c() as usize;
+                    if let Some(bytes) = frame.get_string_constant(c) {
+                        if let Ok(name) = std::str::from_utf8(bytes) {
+                            return (Some(name.to_string()), Some("field".to_string()));
+                        }
+                    }
+                    break;
+                }
+                // Skip over CALL/CALLT - the value was there before the call
+                Opcode::CALL | Opcode::CALLT | Opcode::CALLM | Opcode::CALLMT => {
+                    // Continue searching - the slot held a value before this call
+                    continue;
+                }
+                // For other opcodes that write to the slot, stop searching
+                _ => {
+                    break;
+                }
+            }
+        }
+
+        (None, None)
+    }
+
     /// Call a binary metamethod and return the result
-    fn call_binary_metamethod(&mut self, mm: Value, a: Value, b: Value, result_slot: usize) -> LuaResult<()> {
+    fn call_binary_metamethod(&mut self, mm: Value, a: Value, b: Value, result_slot: usize, mm_name: &str) -> LuaResult<()> {
         // Set up the call: func, arg1, arg2
         let call_base = self.state.stack.top();
         self.state.stack.set(call_base, mm);
@@ -256,8 +370,16 @@ impl<'a> Interpreter<'a> {
         self.state.stack.set(call_base + 2, b);
         self.state.stack.set_top(call_base + 3);
 
+        // Track metamethod for debug info
+        self.state.current_metamethod = Some(mm_name.to_string());
+
         // Call the metamethod
-        self.call(call_base, 2, 1)?;
+        let result = self.call(call_base, 2, 1);
+
+        // Clear metamethod tracking
+        self.state.current_metamethod = None;
+
+        result?;
 
         // Get the result and move it to the target slot
         let result = self.state.stack.get(call_base);
@@ -267,7 +389,7 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Call a unary metamethod and return the result
-    fn call_unary_metamethod(&mut self, mm: Value, a: Value, result_slot: usize) -> LuaResult<()> {
+    fn call_unary_metamethod(&mut self, mm: Value, a: Value, result_slot: usize, mm_name: &str) -> LuaResult<()> {
         // Set up the call: func, arg, arg (Lua passes operand twice for consistency with binary ops)
         let call_base = self.state.stack.top();
         self.state.stack.set(call_base, mm);
@@ -275,8 +397,16 @@ impl<'a> Interpreter<'a> {
         self.state.stack.set(call_base + 2, a);
         self.state.stack.set_top(call_base + 3);
 
+        // Track metamethod for debug info
+        self.state.current_metamethod = Some(mm_name.to_string());
+
         // Call the metamethod
-        self.call(call_base, 2, 1)?;
+        let result = self.call(call_base, 2, 1);
+
+        // Clear metamethod tracking
+        self.state.current_metamethod = None;
+
+        result?;
 
         // Get the result and move it to the target slot
         let result = self.state.stack.get(call_base);
@@ -297,10 +427,10 @@ impl<'a> Interpreter<'a> {
             Err(LuaError::ArithmeticError(_)) => {
                 // Try metamethod from first operand, then second
                 if let Some(mm) = self.get_metamethod(&vb, mm_name) {
-                    return self.call_binary_metamethod(mm, vb, vc, base_a);
+                    return self.call_binary_metamethod(mm, vb, vc, base_a, mm_name);
                 }
                 if let Some(mm) = self.get_metamethod(&vc, mm_name) {
-                    return self.call_binary_metamethod(mm, vb, vc, base_a);
+                    return self.call_binary_metamethod(mm, vb, vc, base_a, mm_name);
                 }
                 // No metamethod found, return the original error
                 let ty = if vb.coerce_to_number().is_none() {
@@ -326,7 +456,7 @@ impl<'a> Interpreter<'a> {
             Err(LuaError::ArithmeticError(_)) => {
                 // Try metamethod
                 if let Some(mm) = self.get_metamethod(&v, mm_name) {
-                    return self.call_unary_metamethod(mm, v.clone(), base_a);
+                    return self.call_unary_metamethod(mm, v.clone(), base_a, mm_name);
                 }
                 Err(LuaError::ArithmeticError(v.lua_type()))
             }
@@ -335,14 +465,22 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Call a comparison metamethod and return the boolean result
-    fn call_compare_metamethod(&mut self, mm: Value, a: Value, b: Value) -> LuaResult<bool> {
+    fn call_compare_metamethod(&mut self, mm: Value, a: Value, b: Value, mm_name: &str) -> LuaResult<bool> {
         let call_base = self.state.stack.top();
         self.state.stack.set(call_base, mm);
         self.state.stack.set(call_base + 1, a);
         self.state.stack.set(call_base + 2, b);
         self.state.stack.set_top(call_base + 3);
 
-        self.call(call_base, 2, 1)?;
+        // Track metamethod for debug info
+        self.state.current_metamethod = Some(mm_name.to_string());
+
+        let result = self.call(call_base, 2, 1);
+
+        // Clear metamethod tracking
+        self.state.current_metamethod = None;
+
+        result?;
 
         let result = self.state.stack.get(call_base);
         Ok(result.is_truthy())
@@ -353,11 +491,11 @@ impl<'a> Interpreter<'a> {
     fn compare_lt(&mut self, a: Value, b: Value) -> LuaResult<Option<bool>> {
         // Try __lt from first operand
         if let Some(mm) = self.get_metamethod(&a, "__lt") {
-            return Ok(Some(self.call_compare_metamethod(mm, a, b)?));
+            return Ok(Some(self.call_compare_metamethod(mm, a, b, "__lt")?));
         }
         // Try __lt from second operand
         if let Some(mm) = self.get_metamethod(&b, "__lt") {
-            return Ok(Some(self.call_compare_metamethod(mm, a, b)?));
+            return Ok(Some(self.call_compare_metamethod(mm, a, b, "__lt")?));
         }
         Ok(None)
     }
@@ -367,11 +505,11 @@ impl<'a> Interpreter<'a> {
     fn compare_le(&mut self, a: Value, b: Value) -> LuaResult<Option<bool>> {
         // Try __le from first operand
         if let Some(mm) = self.get_metamethod(&a, "__le") {
-            return Ok(Some(self.call_compare_metamethod(mm, a.clone(), b.clone())?));
+            return Ok(Some(self.call_compare_metamethod(mm, a.clone(), b.clone(), "__le")?));
         }
         // Try __le from second operand
         if let Some(mm) = self.get_metamethod(&b, "__le") {
-            return Ok(Some(self.call_compare_metamethod(mm, a.clone(), b.clone())?));
+            return Ok(Some(self.call_compare_metamethod(mm, a.clone(), b.clone(), "__le")?));
         }
         // Fall back to not(b < a) if __lt is available
         if let Some(result) = self.compare_lt(b, a)? {
@@ -420,9 +558,13 @@ impl<'a> Interpreter<'a> {
             self.state.stack.set(call_base + 1, table);
             self.state.stack.set(call_base + 2, key);
             self.state.stack.set_top(call_base + 3);
-            self.call(call_base, 2, 1)?;
-            let result = self.state.stack.get(call_base);
-            self.state.stack.set(result_slot, result);
+            // Track metamethod for debug info
+            self.state.current_metamethod = Some("__index".to_string());
+            let result = self.call(call_base, 2, 1);
+            self.state.current_metamethod = None;
+            result?;
+            let val = self.state.stack.get(call_base);
+            self.state.stack.set(result_slot, val);
         } else {
             self.state.stack.set(result_slot, Value::nil());
         }
@@ -452,13 +594,41 @@ impl<'a> Interpreter<'a> {
                     self.state.stack.set(call_base + 2, key);
                     self.state.stack.set(call_base + 3, val);
                     self.state.stack.set_top(call_base + 4);
-                    self.call(call_base, 3, 0)?;
+                    // Track metamethod for debug info
+                    self.state.current_metamethod = Some("__newindex".to_string());
+                    let result = self.call(call_base, 3, 0);
+                    self.state.current_metamethod = None;
+                    result?;
                 }
                 return Ok(());
             }
             // No metamethod, just set
             unsafe { (*t.as_ptr()).set(key, val) };
             Ok(())
+        } else if table.is_userdata() {
+            // Userdata always needs __newindex metamethod
+            if let Some(mm) = self.get_metamethod(&table, "__newindex") {
+                if let Some(idx_table) = mm.as_table() {
+                    // __newindex is a table, set in it
+                    unsafe { (*idx_table.as_ptr()).set(key, val) };
+                } else if mm.as_function().is_some() {
+                    // __newindex is a function, call it
+                    let call_base = self.state.stack.top();
+                    self.state.stack.set(call_base, mm);
+                    self.state.stack.set(call_base + 1, table);
+                    self.state.stack.set(call_base + 2, key);
+                    self.state.stack.set(call_base + 3, val);
+                    self.state.stack.set_top(call_base + 4);
+                    // Track metamethod for debug info
+                    self.state.current_metamethod = Some("__newindex".to_string());
+                    let result = self.call(call_base, 3, 0);
+                    self.state.current_metamethod = None;
+                    result?;
+                }
+                return Ok(());
+            }
+            // No metamethod - error
+            Err(LuaError::IndexError(table.lua_type()))
         } else {
             Err(LuaError::IndexError(table.lua_type()))
         }
@@ -616,9 +786,13 @@ impl<'a> Interpreter<'a> {
                         self.state.stack.set(call_base, mm);
                         self.state.stack.set(call_base + 1, vd);
                         self.state.stack.set_top(call_base + 2);
-                        self.call(call_base, 1, 1)?;
-                        let result = self.state.stack.get(call_base);
-                        self.state.stack.set(base + a, result);
+                        // Track metamethod for debug info
+                        self.state.current_metamethod = Some("__len".to_string());
+                        let result = self.call(call_base, 1, 1);
+                        self.state.current_metamethod = None;
+                        result?;
+                        let val = self.state.stack.get(call_base);
+                        self.state.stack.set(base + a, val);
                     } else {
                         return Err(LuaError::LengthError(vd.lua_type()));
                     }
@@ -691,7 +865,7 @@ impl<'a> Interpreter<'a> {
                         match (mm_a, mm_d) {
                             (Some(mma), Some(mmd)) if mma.raw_eq(&mmd) => {
                                 // Both have the same __eq metamethod
-                                self.call_compare_metamethod(mma, va, vd)?
+                                self.call_compare_metamethod(mma, va, vd, "__eq")?
                             }
                             _ => false,
                         }
@@ -1154,10 +1328,10 @@ impl<'a> Interpreter<'a> {
                             _ => {
                                 // Try __concat metamethod from left, then right
                                 if let Some(mm) = self.get_metamethod(&left, "__concat") {
-                                    self.call_binary_metamethod(mm, left, right, base + c)?;
+                                    self.call_binary_metamethod(mm, left, right, base + c, "__concat")?;
                                     right = self.state.stack.get(base + c);
                                 } else if let Some(mm) = self.get_metamethod(&right, "__concat") {
-                                    self.call_binary_metamethod(mm, left, right, base + c)?;
+                                    self.call_binary_metamethod(mm, left, right, base + c, "__concat")?;
                                     right = self.state.stack.get(base + c);
                                 } else {
                                     // No metamethod - error

@@ -46,6 +46,12 @@ pub struct State {
     pub is_method_call: bool,
     /// Cached error location (captured before stack unwinding)
     pub error_location: Option<String>,
+    /// Current metamethod being called (for debug info)
+    pub current_metamethod: Option<String>,
+    /// Name of the value being called (for __call metamethod debug info)
+    pub call_name: Option<String>,
+    /// How the called value was accessed (for __call metamethod debug info)
+    pub call_name_what: Option<String>,
 }
 
 /// Thread/coroutine status
@@ -87,6 +93,9 @@ impl State {
             open_upvalues: None,
             is_method_call: false,
             error_location: None,
+            current_metamethod: None,
+            call_name: None,
+            call_name_what: None,
         };
 
         // Initialize standard globals

@@ -63,8 +63,10 @@ pub struct UpvalueDesc {
 /// Local variable debug info
 #[derive(Debug, Clone)]
 pub struct LocVar {
-    /// Variable name
-    pub name: Option<GcRef<LuaString>>,
+    /// Variable name (stored as String at compile time, interned at runtime when needed)
+    pub name: String,
+    /// Register slot where the variable is stored
+    pub slot: u8,
     /// First bytecode where variable is active
     pub start_pc: u32,
     /// Last bytecode where variable is active

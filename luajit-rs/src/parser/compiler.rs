@@ -299,6 +299,18 @@ impl<'a> Compiler<'a> {
         // Resolve gotos
         self.resolve_gotos()?;
 
+        // Add remaining locals to proto.locvars (they're active until end of function)
+        let end_pc = self.fs().current_pc() as u32;
+        let remaining_locals: Vec<_> = self.fs().locals.iter().cloned().collect();
+        for local in remaining_locals {
+            self.fs_mut().proto.locvars.push(LocVar {
+                name: local.name,
+                slot: local.slot,
+                start_pc: local.start_pc as u32,
+                end_pc,
+            });
+        }
+
         // Finalize
         let mut fs = self.functions.pop().unwrap();
         fs.proto.num_upvalues = fs.upvalues.len() as u8;
@@ -464,6 +476,17 @@ impl<'a> Compiler<'a> {
                 Instruction::adj(Opcode::UCLO, first_slot, 0),
                 line,
             );
+        }
+
+        // Add closed locals to proto.locvars for debug info
+        let end_pc = self.fs().current_pc() as u32;
+        for local in &locals_to_remove {
+            self.fs_mut().proto.locvars.push(LocVar {
+                name: local.name.clone(),
+                slot: local.slot,
+                start_pc: local.start_pc as u32,
+                end_pc,
+            });
         }
 
         self.fs_mut().locals.truncate(from);
@@ -2838,6 +2861,18 @@ impl<'a> Compiler<'a> {
 
         // Resolve gotos
         self.resolve_gotos()?;
+
+        // Add remaining locals to proto.locvars (they're active until end of function)
+        let end_pc = self.fs().current_pc() as u32;
+        let remaining_locals: Vec<_> = self.fs().locals.iter().cloned().collect();
+        for local in remaining_locals {
+            self.fs_mut().proto.locvars.push(LocVar {
+                name: local.name,
+                slot: local.slot,
+                start_pc: local.start_pc as u32,
+                end_pc,
+            });
+        }
 
         // Pop function state and copy metadata to proto
         let mut fs = self.functions.pop().unwrap();

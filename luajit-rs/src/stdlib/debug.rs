@@ -331,6 +331,8 @@ fn debug_getinfo(state: &mut State) -> LuaResult<usize> {
         let frame_info = {
             let frames = state.call_stack.frames();
             let frame = &frames[frames.len() - 1 - level];
+            let name = frame.name.clone();
+            let name_what = frame.name_what.clone();
             frame.closure.map(|closure| {
                 let proto = unsafe { &*(*closure.as_ptr()).proto.as_ptr() };
                 let source = if let Some(src_ref) = proto.source {
@@ -345,11 +347,16 @@ fn debug_getinfo(state: &mut State) -> LuaResult<usize> {
                 } else {
                     -1
                 };
-                (source, line_defined, current_line)
+                (source, line_defined, current_line, name, name_what)
             })
         };
 
-        if let Some((source, line_defined, current_line)) = frame_info {
+        // Check if we're in a metamethod or have call name info (for __call)
+        let current_mm = state.current_metamethod.clone();
+        let call_name = state.call_name.clone();
+        let call_name_what = state.call_name_what.clone();
+
+        if let Some((source, line_defined, current_line, name, name_what)) = frame_info {
             if what.contains('S') {
                 let source_key = state.intern_string("source");
                 let source_val = state.intern_string(&source);
@@ -357,11 +364,52 @@ fn debug_getinfo(state: &mut State) -> LuaResult<usize> {
 
                 let linedefined_key = state.intern_string("linedefined");
                 unsafe { (*info.as_ptr()).set(linedefined_key, Value::integer(line_defined)); }
+
+                let what_key = state.intern_string("what");
+                let what_val = state.intern_string("Lua");
+                unsafe { (*info.as_ptr()).set(what_key, what_val); }
             }
 
             if what.contains('l') {
                 let currentline_key = state.intern_string("currentline");
                 unsafe { (*info.as_ptr()).set(currentline_key, Value::integer(current_line)); }
+            }
+
+            if what.contains('n') {
+                // Check if we're in a metamethod first
+                if let Some(ref mm_name) = current_mm {
+                    let name_key = state.intern_string("name");
+                    let name_val = state.intern_string(mm_name);
+                    unsafe { (*info.as_ptr()).set(name_key, name_val); }
+
+                    let namewhat_key = state.intern_string("namewhat");
+                    let namewhat_val = state.intern_string("metamethod");
+                    unsafe { (*info.as_ptr()).set(namewhat_key, namewhat_val); }
+                } else if let Some(ref cn) = call_name {
+                    // __call: report how the called object was accessed
+                    let name_key = state.intern_string("name");
+                    let name_val = state.intern_string(cn);
+                    unsafe { (*info.as_ptr()).set(name_key, name_val); }
+
+                    let namewhat_key = state.intern_string("namewhat");
+                    let namewhat_val = state.intern_string(call_name_what.as_deref().unwrap_or(""));
+                    unsafe { (*info.as_ptr()).set(namewhat_key, namewhat_val); }
+                } else if let Some(ref n) = name {
+                    let name_key = state.intern_string("name");
+                    let name_val = state.intern_string(n);
+                    unsafe { (*info.as_ptr()).set(name_key, name_val); }
+
+                    let namewhat_key = state.intern_string("namewhat");
+                    let namewhat_val = state.intern_string(name_what.as_deref().unwrap_or(""));
+                    unsafe { (*info.as_ptr()).set(namewhat_key, namewhat_val); }
+                } else {
+                    let name_key = state.intern_string("name");
+                    unsafe { (*info.as_ptr()).set(name_key, Value::nil()); }
+
+                    let namewhat_key = state.intern_string("namewhat");
+                    let namewhat_val = state.intern_string("");
+                    unsafe { (*info.as_ptr()).set(namewhat_key, namewhat_val); }
+                }
             }
         }
     }

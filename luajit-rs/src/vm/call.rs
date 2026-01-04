@@ -40,6 +40,10 @@ pub struct CallFrame {
     pub vararg_count: usize,
     /// Stack slot of the function itself (where results go)
     pub func_idx: usize,
+    /// Function name (for debug info)
+    pub name: Option<String>,
+    /// How the function was called: "metamethod", "local", "global", "field", etc.
+    pub name_what: Option<String>,
 }
 
 impl CallFrame {
@@ -55,6 +59,25 @@ impl CallFrame {
             vararg_base: None,
             vararg_count: 0,
             func_idx,
+            name: None,
+            name_what: None,
+        }
+    }
+
+    /// Create a new Lua call frame with name info
+    pub fn new_lua_named(closure: GcRef<Closure>, base: usize, func_idx: usize, num_results: i32, name: Option<String>, name_what: Option<String>) -> Self {
+        Self {
+            closure: Some(closure),
+            pc: 0,
+            base,
+            top: base,
+            num_results,
+            is_native: false,
+            vararg_base: None,
+            vararg_count: 0,
+            func_idx,
+            name,
+            name_what,
         }
     }
 
@@ -70,6 +93,25 @@ impl CallFrame {
             vararg_base: None,
             vararg_count: 0,
             func_idx,
+            name: None,
+            name_what: None,
+        }
+    }
+
+    /// Create a new native call frame with name info
+    pub fn new_native_named(base: usize, func_idx: usize, num_results: i32, name: Option<String>, name_what: Option<String>) -> Self {
+        Self {
+            closure: None,
+            pc: 0,
+            base,
+            top: base,
+            num_results,
+            is_native: true,
+            vararg_base: None,
+            vararg_count: 0,
+            func_idx,
+            name,
+            name_what,
         }
     }
 
