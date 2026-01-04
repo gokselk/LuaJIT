@@ -31,15 +31,14 @@ pub fn register_math(state: &mut State) {
         unsafe { (*math.as_ptr()).set(key, Value::function(func_ref)); }
     };
 
-    // Constants
+    // Constants (Lua 5.1 compatible)
     unsafe {
         (*math.as_ptr()).set(state.intern_string("pi"), Value::number(PI));
         (*math.as_ptr()).set(state.intern_string("huge"), Value::number(f64::INFINITY));
-        (*math.as_ptr()).set(state.intern_string("maxinteger"), Value::number(i64::MAX as f64));
-        (*math.as_ptr()).set(state.intern_string("mininteger"), Value::number(i64::MIN as f64));
+        // Note: maxinteger/mininteger are Lua 5.3+, not added for Lua 5.1 compatibility
     }
 
-    // Add functions to math table (not as globals)
+    // Add functions to math table (Lua 5.1 compatible)
     add_func(state, math, "abs", math_abs);
     add_func(state, math, "acos", math_acos);
     add_func(state, math, "asin", math_asin);
@@ -60,9 +59,7 @@ pub fn register_math(state: &mut State) {
     add_func(state, math, "sin", math_sin);
     add_func(state, math, "sqrt", math_sqrt);
     add_func(state, math, "tan", math_tan);
-    add_func(state, math, "tointeger", math_tointeger);
-    add_func(state, math, "type", math_type);
-    add_func(state, math, "ult", math_ult);
+    // LuaJIT/Lua 5.1 functions
     add_func(state, math, "atan2", math_atan2);
     add_func(state, math, "ldexp", math_ldexp);
     add_func(state, math, "frexp", math_frexp);
@@ -71,6 +68,7 @@ pub fn register_math(state: &mut State) {
     add_func(state, math, "cosh", math_cosh);
     add_func(state, math, "sinh", math_sinh);
     add_func(state, math, "tanh", math_tanh);
+    // Note: tointeger, type, ult are Lua 5.3+, not added for Lua 5.1 compatibility
 
     state.set_global("math", Value::table(math));
 }

@@ -15,13 +15,18 @@ pub fn register_base(state: &mut State) {
     state.register_function("xpcall", lua_xpcall);
     state.register_function("pairs", lua_pairs);
     state.register_function("ipairs", lua_ipairs);
-    state.register_function("__ipairs_iter", lua_ipairs_iter);
     state.register_function("next", lua_next);
     state.register_function("select", lua_select);
     state.register_function("rawequal", lua_rawequal);
     state.register_function("rawget", lua_rawget);
     state.register_function("rawset", lua_rawset);
-    state.register_function("rawlen", lua_rawlen);
+    state.register_function("gcinfo", lua_gcinfo);
+
+    // Store ipairs_iter in registry for internal use
+    let ipairs_iter = crate::value::NativeFunction::new(lua_ipairs_iter);
+    let ipairs_iter_func = state.gc.alloc(crate::value::Function::Native(ipairs_iter));
+    let key = state.intern_string("__ipairs_iter");
+    unsafe { (*state.registry.as_ptr()).set(key, Value::function(ipairs_iter_func)); }
     state.register_function("setmetatable", lua_setmetatable);
     state.register_function("getmetatable", lua_getmetatable);
     state.register_function("collectgarbage", lua_collectgarbage);
@@ -281,8 +286,10 @@ fn lua_ipairs(state: &mut State) -> LuaResult<usize> {
         });
     }
 
-    // Return ipairs iterator, table, 0
-    let iter = state.get_global("__ipairs_iter");
+    // Get ipairs iterator from registry
+    let key = state.intern_string("__ipairs_iter");
+    let registry = unsafe { &*state.registry.as_ptr() };
+    let iter = registry.get(&key);
     state.push(iter)?;
     state.push(table)?;
     state.push(Value::integer(0))?;
@@ -557,6 +564,14 @@ fn lua_collectgarbage(state: &mut State) -> LuaResult<usize> {
         }
     }
 
+    Ok(1)
+}
+
+/// gcinfo() -> memory_in_use_kb
+/// Deprecated in Lua 5.1, but still available for compatibility
+fn lua_gcinfo(state: &mut State) -> LuaResult<usize> {
+    let kb = state.memory_used() / 1024;
+    state.push(Value::integer(kb as i32))?;
     Ok(1)
 }
 

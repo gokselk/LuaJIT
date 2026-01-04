@@ -15,13 +15,18 @@ pub fn register_table(state: &mut State) {
         unsafe { (*tbl.as_ptr()).set(key, Value::function(func_ref)); }
     };
 
-    // Add functions to table
+    // Add functions to table (Lua 5.1 compatible)
     add_func(state, table_lib, "concat", table_concat);
     add_func(state, table_lib, "insert", table_insert);
     add_func(state, table_lib, "remove", table_remove);
     add_func(state, table_lib, "sort", table_sort);
-    add_func(state, table_lib, "unpack", table_unpack);
-    add_func(state, table_lib, "pack", table_pack);
+    // Lua 5.1 deprecated functions (but still present in LuaJIT)
+    add_func(state, table_lib, "foreach", table_foreach);
+    add_func(state, table_lib, "foreachi", table_foreachi);
+    add_func(state, table_lib, "getn", table_getn);
+    add_func(state, table_lib, "maxn", table_maxn);
+    // Lua 5.3+ functions (not for 5.1 compatibility, but needed for move)
+    add_func(state, table_lib, "move", table_move);
 
     state.set_global("table", Value::table(table_lib));
 
@@ -348,5 +353,206 @@ fn table_pack(state: &mut State) -> LuaResult<usize> {
     }
 
     state.push(Value::table(t))?;
+    Ok(1)
+}
+
+/// table.foreach(t, f) - call f(k, v) for each element, stop if f returns non-nil
+/// Deprecated in Lua 5.1, but still available
+fn table_foreach(state: &mut State) -> LuaResult<usize> {
+    let t = state.get_value(1);
+    let f = state.get_value(2);
+
+    if !t.is_table() {
+        return Err(LuaError::ArgumentError {
+            func: "foreach".to_string(),
+            arg: 1,
+            msg: "table expected".to_string(),
+        });
+    }
+    if !f.is_function() {
+        return Err(LuaError::ArgumentError {
+            func: "foreach".to_string(),
+            arg: 2,
+            msg: "function expected".to_string(),
+        });
+    }
+
+    let table = unsafe { &*t.as_table().unwrap().as_ptr() };
+    let mut key = Value::nil();
+
+    loop {
+        match table.next_checked(&key) {
+            Ok(Some((k, v))) => {
+                // Call f(k, v)
+                state.push(f)?;
+                state.push(k)?;
+                state.push(v)?;
+                state.call(2, 1)?;
+                let result = state.get_value(1);
+                state.set_top(0);
+
+                if !result.is_nil() {
+                    state.push(result)?;
+                    return Ok(1);
+                }
+                key = k;
+            }
+            Ok(None) => break,
+            Err(_) => return Err(LuaError::RuntimeError("invalid key in next".to_string())),
+        }
+    }
+
+    Ok(0)
+}
+
+/// table.foreachi(t, f) - call f(i, v) for i=1 to #t, stop if f returns non-nil
+/// Deprecated in Lua 5.1, but still available
+fn table_foreachi(state: &mut State) -> LuaResult<usize> {
+    let t = state.get_value(1);
+    let f = state.get_value(2);
+
+    if !t.is_table() {
+        return Err(LuaError::ArgumentError {
+            func: "foreachi".to_string(),
+            arg: 1,
+            msg: "table expected".to_string(),
+        });
+    }
+    if !f.is_function() {
+        return Err(LuaError::ArgumentError {
+            func: "foreachi".to_string(),
+            arg: 2,
+            msg: "function expected".to_string(),
+        });
+    }
+
+    let table = unsafe { &*t.as_table().unwrap().as_ptr() };
+    let len = table.len();
+
+    for i in 1..=len {
+        let v = table.get_array(i);
+        // Call f(i, v)
+        state.push(f)?;
+        state.push(Value::integer(i as i32))?;
+        state.push(v)?;
+        state.call(2, 1)?;
+        let result = state.get_value(1);
+        state.set_top(0);
+
+        if !result.is_nil() {
+            state.push(result)?;
+            return Ok(1);
+        }
+    }
+
+    Ok(0)
+}
+
+/// table.getn(t) - return length of table (same as #t)
+/// Deprecated in Lua 5.1, but still available
+fn table_getn(state: &mut State) -> LuaResult<usize> {
+    let t = state.get_value(1);
+
+    if let Some(t_ref) = t.as_table() {
+        let table = unsafe { &*t_ref.as_ptr() };
+        state.push(Value::integer(table.len() as i32))?;
+        Ok(1)
+    } else {
+        Err(LuaError::ArgumentError {
+            func: "getn".to_string(),
+            arg: 1,
+            msg: "table expected".to_string(),
+        })
+    }
+}
+
+/// table.maxn(t) - return largest positive integer key in table
+/// Deprecated in Lua 5.2, but still available in LuaJIT
+fn table_maxn(state: &mut State) -> LuaResult<usize> {
+    let t = state.get_value(1);
+
+    if let Some(t_ref) = t.as_table() {
+        let table = unsafe { &*t_ref.as_ptr() };
+        let mut maxn = 0.0f64;
+
+        let mut key = Value::nil();
+        loop {
+            match table.next_checked(&key) {
+                Ok(Some((k, _))) => {
+                    if let Some(n) = k.as_number() {
+                        if n > 0.0 && n == (n as i64) as f64 && n > maxn {
+                            maxn = n;
+                        }
+                    }
+                    key = k;
+                }
+                Ok(None) => break,
+                Err(_) => return Err(LuaError::RuntimeError("invalid key in next".to_string())),
+            }
+        }
+
+        state.push(Value::number(maxn))?;
+        Ok(1)
+    } else {
+        Err(LuaError::ArgumentError {
+            func: "maxn".to_string(),
+            arg: 1,
+            msg: "table expected".to_string(),
+        })
+    }
+}
+
+/// table.move(a1, f, e, t [, a2]) - move elements from a1 to a2
+fn table_move(state: &mut State) -> LuaResult<usize> {
+    let a1 = state.get_value(1);
+    let f = state.to_integer(2).ok_or_else(|| LuaError::ArgumentError {
+        func: "move".to_string(),
+        arg: 2,
+        msg: "number expected".to_string(),
+    })?;
+    let e = state.to_integer(3).ok_or_else(|| LuaError::ArgumentError {
+        func: "move".to_string(),
+        arg: 3,
+        msg: "number expected".to_string(),
+    })?;
+    let t_idx = state.to_integer(4).ok_or_else(|| LuaError::ArgumentError {
+        func: "move".to_string(),
+        arg: 4,
+        msg: "number expected".to_string(),
+    })?;
+    let a2 = if state.get_top() >= 5 {
+        state.get_value(5)
+    } else {
+        a1
+    };
+
+    if !a1.is_table() {
+        return Err(LuaError::ArgumentError {
+            func: "move".to_string(),
+            arg: 1,
+            msg: "table expected".to_string(),
+        });
+    }
+    if !a2.is_table() {
+        return Err(LuaError::ArgumentError {
+            func: "move".to_string(),
+            arg: 5,
+            msg: "table expected".to_string(),
+        });
+    }
+
+    let src = unsafe { &*a1.as_table().unwrap().as_ptr() };
+    let dst = unsafe { &mut *a2.as_table().unwrap().as_ptr() };
+
+    // Copy elements
+    let count = e - f + 1;
+    if count > 0 {
+        for i in 0..count {
+            let val = src.get_array((f + i) as usize);
+            dst.set_array((t_idx + i) as usize, val);
+        }
+    }
+
+    state.push(a2)?;
     Ok(1)
 }
