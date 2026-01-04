@@ -46,10 +46,6 @@ pub fn register_base(state: &mut State) {
     // Add _VERSION
     let version = state.intern_string("Lua 5.1");
     state.set_global("_VERSION", version);
-
-    // Add coroutine table (stub)
-    let coroutine = state.create_table(0, 8);
-    state.set_global("coroutine", Value::table(coroutine));
 }
 
 /// print(...)

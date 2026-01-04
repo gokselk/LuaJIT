@@ -87,7 +87,10 @@ impl Userdata {
     /// Try to get the data as type T
     pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
         if self.is::<T>() && self.data_size == std::mem::size_of::<T>() {
-            Some(unsafe { &*(self.data.as_ptr() as *const T) })
+            // Data is stored at offset size_of::<Userdata>() from the start
+            let header_size = std::mem::size_of::<Userdata>();
+            let data_ptr = unsafe { (self as *const Self as *const u8).add(header_size) as *const T };
+            Some(unsafe { &*data_ptr })
         } else {
             None
         }
@@ -96,7 +99,10 @@ impl Userdata {
     /// Try to get the data as mutable type T
     pub fn downcast_mut<T: 'static>(&mut self) -> Option<&mut T> {
         if self.is::<T>() && self.data_size == std::mem::size_of::<T>() {
-            Some(unsafe { &mut *(self.data.as_mut_ptr() as *mut T) })
+            // Data is stored at offset size_of::<Userdata>() from the start
+            let header_size = std::mem::size_of::<Userdata>();
+            let data_ptr = unsafe { (self as *mut Self as *mut u8).add(header_size) as *mut T };
+            Some(unsafe { &mut *data_ptr })
         } else {
             None
         }

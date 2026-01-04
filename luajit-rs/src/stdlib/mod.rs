@@ -10,6 +10,7 @@ mod io;
 mod os;
 mod debug;
 mod package;
+mod coroutine;
 
 pub use base::register_base;
 pub use math::register_math;
@@ -20,6 +21,7 @@ pub use io::register_io;
 pub use os::register_os;
 pub use debug::register_debug;
 pub use package::register_package;
+pub use coroutine::register_coroutine;
 
 use crate::vm::State;
 
@@ -33,4 +35,5 @@ pub fn register_all(state: &mut State) {
     register_os(state);
     register_debug(state);
     register_package(state);
+    register_coroutine(state);
 }
