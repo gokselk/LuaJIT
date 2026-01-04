@@ -589,9 +589,17 @@ impl<'a> Interpreter<'a> {
                     let d = instr.d() as usize;
                     let vd = self.state.stack.get(base + d);
 
-                    // Check for __len metamethod first (for tables and userdata)
-                    if let Some(mm) = self.get_metamethod(&vd, "__len") {
-                        // Call the __len metamethod
+                    // In LuaJIT 5.1 mode, __len metamethod is NOT called for tables
+                    // It's only called for userdata and other types with debug metatables
+                    if let Some(t) = vd.as_table() {
+                        // For tables, always use raw length (no __len in 5.1 mode)
+                        let len = unsafe { (*t.as_ptr()).len() as f64 };
+                        self.state.stack.set(base + a, Value::number(len));
+                    } else if let Some(s) = vd.as_string() {
+                        let len = unsafe { (*s.as_ptr()).len() as f64 };
+                        self.state.stack.set(base + a, Value::number(len));
+                    } else if let Some(mm) = self.get_metamethod(&vd, "__len") {
+                        // For userdata and other types, check __len metamethod
                         let call_base = self.state.stack.top();
                         self.state.stack.set(call_base, mm);
                         self.state.stack.set(call_base + 1, vd);
@@ -599,12 +607,6 @@ impl<'a> Interpreter<'a> {
                         self.call(call_base, 1, 1)?;
                         let result = self.state.stack.get(call_base);
                         self.state.stack.set(base + a, result);
-                    } else if let Some(t) = vd.as_table() {
-                        let len = unsafe { (*t.as_ptr()).len() as f64 };
-                        self.state.stack.set(base + a, Value::number(len));
-                    } else if let Some(s) = vd.as_string() {
-                        let len = unsafe { (*s.as_ptr()).len() as f64 };
-                        self.state.stack.set(base + a, Value::number(len));
                     } else {
                         return Err(LuaError::LengthError(vd.lua_type()));
                     }
