@@ -213,10 +213,50 @@ pub fn register_io(state: &mut State) {
     add_func(state, io_table, "type", io_type);
     add_func(state, io_table, "write", io_write);
 
-    // Create stdin, stdout, stderr file handles
+    // Create file handle metatable
+    let file_mt = state.create_table(0, 16);
+    add_func(state, file_mt, "close", file_close);
+    add_func(state, file_mt, "flush", file_flush);
+    add_func(state, file_mt, "lines", file_lines);
+    add_func(state, file_mt, "read", file_read_method);
+    add_func(state, file_mt, "seek", file_seek);
+    add_func(state, file_mt, "setvbuf", file_setvbuf);
+    add_func(state, file_mt, "write", file_write_method);
+
+    // Set __index to point to itself for method calls
+    unsafe {
+        let index_key = state.intern_string("__index");
+        (*file_mt.as_ptr()).set(index_key, Value::table(file_mt));
+
+        // Add __tostring
+        let tostring_key = state.intern_string("__tostring");
+        let native = crate::value::NativeFunction::new(file_tostring);
+        let func_ref = state.gc.alloc(crate::value::Function::Native(native));
+        (*file_mt.as_ptr()).set(tostring_key, Value::function(func_ref));
+
+        // Add __gc (stub for now)
+        let gc_key = state.intern_string("__gc");
+        let gc_native = crate::value::NativeFunction::new(file_gc);
+        let gc_func = state.gc.alloc(crate::value::Function::Native(gc_native));
+        (*file_mt.as_ptr()).set(gc_key, Value::function(gc_func));
+    }
+
+    // Store the metatable in registry for later use
+    let mt_key = state.intern_string("_FILE_MT");
+    unsafe {
+        (*state.registry.as_ptr()).set(mt_key, Value::table(file_mt));
+    }
+
+    // Create stdin, stdout, stderr file handles with metatable
     let stdin = alloc_file_userdata(FileHandle::stdin());
     let stdout = alloc_file_userdata(FileHandle::stdout());
     let stderr = alloc_file_userdata(FileHandle::stderr());
+
+    unsafe {
+        (*stdin.as_ptr()).set_metatable(Some(file_mt));
+        (*stdout.as_ptr()).set_metatable(Some(file_mt));
+        (*stderr.as_ptr()).set_metatable(Some(file_mt));
+    }
 
     // Store file handles in io table
     let stdin_key = state.intern_string("stdin");
@@ -760,4 +800,256 @@ fn io_popen(state: &mut State) -> LuaResult<usize> {
     let msg = state.intern_string("popen not supported");
     state.push(msg)?;
     Ok(2)
+}
+
+// File method functions (called on file handle object)
+
+/// file:close()
+fn file_close(state: &mut State) -> LuaResult<usize> {
+    let file = state.get_value(1);
+    if let Some(ud) = file.as_userdata() {
+        let ud = unsafe { &*ud.as_ptr() };
+        if let Some(fh) = ud.downcast_ref::<FileHandle>() {
+            match fh.close() {
+                Ok(()) => {
+                    state.push(Value::boolean(true))?;
+                    Ok(1)
+                }
+                Err(e) => {
+                    state.push(Value::nil())?;
+                    let msg = state.intern_string(&e.to_string());
+                    state.push(msg)?;
+                    Ok(2)
+                }
+            }
+        } else {
+            Err(LuaError::ArgumentError {
+                func: "close".to_string(),
+                arg: 1,
+                msg: "file expected".to_string(),
+            })
+        }
+    } else {
+        Err(LuaError::ArgumentError {
+            func: "close".to_string(),
+            arg: 1,
+            msg: "file expected".to_string(),
+        })
+    }
+}
+
+/// file:flush()
+fn file_flush(state: &mut State) -> LuaResult<usize> {
+    let file = state.get_value(1);
+    if let Some(ud) = file.as_userdata() {
+        let ud = unsafe { &*ud.as_ptr() };
+        if let Some(fh) = ud.downcast_ref::<FileHandle>() {
+            match fh.flush() {
+                Ok(()) => {
+                    state.push(Value::boolean(true))?;
+                    Ok(1)
+                }
+                Err(e) => {
+                    state.push(Value::nil())?;
+                    let msg = state.intern_string(&e.to_string());
+                    state.push(msg)?;
+                    Ok(2)
+                }
+            }
+        } else {
+            Err(LuaError::ArgumentError {
+                func: "flush".to_string(),
+                arg: 1,
+                msg: "file expected".to_string(),
+            })
+        }
+    } else {
+        Err(LuaError::ArgumentError {
+            func: "flush".to_string(),
+            arg: 1,
+            msg: "file expected".to_string(),
+        })
+    }
+}
+
+/// file:lines()
+fn file_lines(state: &mut State) -> LuaResult<usize> {
+    let file = state.get_value(1);
+
+    let iter = crate::value::NativeFunction::new(lines_iterator);
+    let iter_func = state.gc.alloc(crate::value::Function::Native(iter));
+    state.push(Value::function(iter_func))?;
+    state.push(file)?;
+    state.push(Value::nil())?;
+    Ok(3)
+}
+
+/// file:read(...)
+fn file_read_method(state: &mut State) -> LuaResult<usize> {
+    let file = state.get_value(1);
+
+    if let Some(ud) = file.as_userdata() {
+        let ud = unsafe { &*ud.as_ptr() };
+        if let Some(fh) = ud.downcast_ref::<FileHandle>() {
+            return file_read(state, fh, 2);
+        }
+    }
+
+    Err(LuaError::ArgumentError {
+        func: "read".to_string(),
+        arg: 1,
+        msg: "file expected".to_string(),
+    })
+}
+
+/// file:seek([whence [, offset]])
+fn file_seek(state: &mut State) -> LuaResult<usize> {
+    let file = state.get_value(1);
+
+    if let Some(ud) = file.as_userdata() {
+        let ud = unsafe { &*ud.as_ptr() };
+        if let Some(fh) = ud.downcast_ref::<FileHandle>() {
+            let whence = if state.get_top() >= 2 {
+                if let Some(s) = state.get_value(2).as_string() {
+                    unsafe { (*s.as_ptr()).as_str().unwrap_or("cur").to_string() }
+                } else {
+                    "cur".to_string()
+                }
+            } else {
+                "cur".to_string()
+            };
+
+            let offset = if state.get_top() >= 3 {
+                state.to_number(3).unwrap_or(0.0) as i64
+            } else {
+                0
+            };
+
+            let seek_pos = match whence.as_str() {
+                "set" => SeekFrom::Start(offset as u64),
+                "cur" => SeekFrom::Current(offset),
+                "end" => SeekFrom::End(offset),
+                _ => {
+                    return Err(LuaError::ArgumentError {
+                        func: "seek".to_string(),
+                        arg: 2,
+                        msg: format!("invalid option '{}'", whence),
+                    });
+                }
+            };
+
+            match fh.seek(seek_pos) {
+                Ok(pos) => {
+                    state.push(Value::number(pos as f64))?;
+                    Ok(1)
+                }
+                Err(e) => {
+                    state.push(Value::nil())?;
+                    let msg = state.intern_string(&e.to_string());
+                    state.push(msg)?;
+                    Ok(2)
+                }
+            }
+        } else {
+            Err(LuaError::ArgumentError {
+                func: "seek".to_string(),
+                arg: 1,
+                msg: "file expected".to_string(),
+            })
+        }
+    } else {
+        Err(LuaError::ArgumentError {
+            func: "seek".to_string(),
+            arg: 1,
+            msg: "file expected".to_string(),
+        })
+    }
+}
+
+/// file:setvbuf(mode [, size])
+fn file_setvbuf(state: &mut State) -> LuaResult<usize> {
+    // Buffering is handled by the OS/libc, we just return success
+    state.push(Value::boolean(true))?;
+    Ok(1)
+}
+
+/// file:write(...)
+fn file_write_method(state: &mut State) -> LuaResult<usize> {
+    let file = state.get_value(1);
+
+    if let Some(ud) = file.as_userdata() {
+        let ud = unsafe { &*ud.as_ptr() };
+        if let Some(fh) = ud.downcast_ref::<FileHandle>() {
+            let n = state.get_top();
+            for i in 2..=n as i32 {
+                let val = state.get_value(i);
+                if let Some(str_ref) = val.as_string() {
+                    let str_val = unsafe { &*str_ref.as_ptr() };
+                    if let Some(s) = str_val.as_str() {
+                        if let Err(e) = fh.write(s.as_bytes()) {
+                            state.push(Value::nil())?;
+                            let msg = state.intern_string(&e.to_string());
+                            state.push(msg)?;
+                            return Ok(2);
+                        }
+                    }
+                } else if let Some(num) = val.as_number() {
+                    if let Err(e) = fh.write(format!("{}", num).as_bytes()) {
+                        state.push(Value::nil())?;
+                        let msg = state.intern_string(&e.to_string());
+                        state.push(msg)?;
+                        return Ok(2);
+                    }
+                }
+            }
+            state.push(file)?;
+            return Ok(1);
+        }
+    }
+
+    Err(LuaError::ArgumentError {
+        func: "write".to_string(),
+        arg: 1,
+        msg: "file expected".to_string(),
+    })
+}
+
+/// __tostring metamethod for file handles
+fn file_tostring(state: &mut State) -> LuaResult<usize> {
+    let file = state.get_value(1);
+
+    if let Some(ud) = file.as_userdata() {
+        let ud_ptr = ud.as_ptr();
+        let ud_ref = unsafe { &*ud_ptr };
+        if let Some(fh) = ud_ref.downcast_ref::<FileHandle>() {
+            let s = if fh.is_closed() {
+                format!("file ({})", "closed")
+            } else {
+                format!("file ({:p})", ud_ptr)
+            };
+            let val = state.intern_string(&s);
+            state.push(val)?;
+            return Ok(1);
+        }
+    }
+
+    let s = state.intern_string("file (?)");
+    state.push(s)?;
+    Ok(1)
+}
+
+/// __gc metamethod for file handles
+fn file_gc(state: &mut State) -> LuaResult<usize> {
+    // Close the file if it's open
+    let file = state.get_value(1);
+
+    if let Some(ud) = file.as_userdata() {
+        let ud = unsafe { &*ud.as_ptr() };
+        if let Some(fh) = ud.downcast_ref::<FileHandle>() {
+            // Silently close the file
+            let _ = fh.close();
+        }
+    }
+
+    Ok(0)
 }
