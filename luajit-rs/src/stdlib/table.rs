@@ -175,22 +175,7 @@ fn table_sort(state: &mut State) -> LuaResult<usize> {
         for i in 1..arr.len() {
             let mut j = i;
             while j > 0 {
-                let should_swap = if let Some(ref comp_fn) = comp {
-                    // Call comparator: comp(arr[j], arr[j-1])
-                    // If true, arr[j] should come before arr[j-1]
-                    let base = state.stack.top();
-                    state.stack.set(base, comp_fn.clone());
-                    state.stack.set(base + 1, arr[j].clone());
-                    state.stack.set(base + 2, arr[j - 1].clone());
-                    state.stack.set_top(base + 3);
-
-                    // We need to call the function - but we can't easily call from here
-                    // For now, fall back to default comparison when comp is provided
-                    // This is a limitation we'll need to fix properly later
-                    compare_values(&arr[j], &arr[j - 1])
-                } else {
-                    compare_values(&arr[j], &arr[j - 1])
-                };
+                let should_swap = compare_with_metamethod(state, &arr[j], &arr[j - 1], comp.as_ref())?;
 
                 if should_swap {
                     arr.swap(j, j - 1);
@@ -216,8 +201,80 @@ fn table_sort(state: &mut State) -> LuaResult<usize> {
     }
 }
 
-/// Compare two values for sorting (returns true if a < b)
-fn compare_values(a: &Value, b: &Value) -> bool {
+/// Compare two values for sorting, using metamethods if available
+/// Returns true if a < b
+fn compare_with_metamethod(state: &mut State, a: &Value, b: &Value, comp: Option<&Value>) -> LuaResult<bool> {
+    // If a custom comparator is provided, use it
+    if let Some(comp_fn) = comp {
+        return call_compare_function(state, comp_fn, a, b);
+    }
+
+    // Check for __lt metamethod on either value
+    if let Some(lt_mm) = get_lt_metamethod(state, a, b) {
+        return call_compare_function(state, &lt_mm, a, b);
+    }
+
+    // Fall back to raw comparison
+    Ok(compare_values_raw(a, b))
+}
+
+/// Get the __lt metamethod from either value's metatable
+fn get_lt_metamethod(state: &mut State, a: &Value, b: &Value) -> Option<Value> {
+    // Check a's metatable first
+    if let Some(t) = a.as_table() {
+        let table = unsafe { &*t.as_ptr() };
+        if let Some(mt) = table.get_metatable() {
+            let mt_table = unsafe { &*mt.as_ptr() };
+            let key = state.intern_string("__lt");
+            let mm = mt_table.get(&key);
+            if mm.is_function() {
+                return Some(mm);
+            }
+        }
+    }
+
+    // Check b's metatable
+    if let Some(t) = b.as_table() {
+        let table = unsafe { &*t.as_ptr() };
+        if let Some(mt) = table.get_metatable() {
+            let mt_table = unsafe { &*mt.as_ptr() };
+            let key = state.intern_string("__lt");
+            let mm = mt_table.get(&key);
+            if mm.is_function() {
+                return Some(mm);
+            }
+        }
+    }
+
+    None
+}
+
+/// Call a comparison function and return its boolean result
+fn call_compare_function(state: &mut State, func: &Value, a: &Value, b: &Value) -> LuaResult<bool> {
+    // Save current stack state
+    let saved_top = state.stack.top();
+
+    // Push function and arguments
+    state.stack.set(saved_top, func.clone());
+    state.stack.set(saved_top + 1, a.clone());
+    state.stack.set(saved_top + 2, b.clone());
+    state.stack.set_top(saved_top + 3);
+
+    // Call the function
+    state.call(2, 1)?;
+
+    // Get the result
+    let result = state.get_value(1);
+    let is_true = !result.is_falsy();
+
+    // Restore stack
+    state.set_top(0);
+
+    Ok(is_true)
+}
+
+/// Compare two values for sorting without metamethods (returns true if a < b)
+fn compare_values_raw(a: &Value, b: &Value) -> bool {
     // Number comparison
     if let (Some(na), Some(nb)) = (a.as_number(), b.as_number()) {
         return na < nb;
