@@ -44,6 +44,7 @@ struct LocalVar {
     slot: u8,
     start_pc: usize,
     is_captured: bool,
+    block_level: usize,
 }
 
 /// Jump patch info
@@ -75,10 +76,10 @@ struct FunctionState {
     current_block_id: usize,
     /// Block parent map: block_id -> parent_block_id
     block_parents: Vec<usize>,
-    /// Labels: Vec of (name, PC, block_id, block_level)
-    labels: Vec<(String, usize, usize, usize)>,
-    /// Pending gotos: (name, PC of JMP instruction, block_id)
-    pending_gotos: Vec<(String, usize, usize)>,
+    /// Labels: Vec of (name, PC, block_id, block_level, locals_with_levels)
+    labels: Vec<(String, usize, usize, usize, Vec<(String, usize)>)>,
+    /// Pending gotos: (name, PC of JMP instruction, block_id, block_level, locals_with_levels)
+    pending_gotos: Vec<(String, usize, usize, usize, Vec<(String, usize)>)>,
 }
 
 impl FunctionState {
@@ -318,26 +319,48 @@ impl<'a> Compiler<'a> {
             }
         };
 
-        for (label_name, goto_pc, goto_block) in pending_gotos {
+        for (label_name, goto_pc, goto_block, _goto_block_level, goto_locals) in pending_gotos {
             // Find a visible label - prefer the innermost one (highest level)
             // A label is visible if its block is an ancestor of (or same as) the goto's block
-            let mut best_match: Option<usize> = None;
+            let mut best_match: Option<(usize, usize, Vec<(String, usize)>)> = None; // (target_pc, label_block_level, label_locals)
             let mut best_level: Option<usize> = None;
 
-            for (name, target_pc, label_block, label_level) in &labels {
+            for (name, target_pc, label_block, label_level, label_locals) in &labels {
                 if name == &label_name {
                     // Check if this label is visible from the goto
                     if is_visible(*label_block, goto_block) {
                         // Prefer the innermost visible label (highest level)
                         if best_level.is_none() || *label_level > best_level.unwrap() {
-                            best_match = Some(*target_pc);
+                            best_match = Some((*target_pc, *label_level, label_locals.clone()));
                             best_level = Some(*label_level);
                         }
                     }
                 }
             }
 
-            if let Some(target_pc) = best_match {
+            if let Some((target_pc, label_block_level, label_locals)) = best_match {
+                // For forward gotos, check if we're jumping into variable scope
+                // Filter both goto and label locals to only those visible at the label's block level
+                let goto_visible_count = goto_locals.iter()
+                    .filter(|(_, lvl)| *lvl <= label_block_level)
+                    .count();
+                let label_visible_count = label_locals.iter()
+                    .filter(|(_, lvl)| *lvl <= label_block_level)
+                    .count();
+
+                if target_pc > goto_pc && label_visible_count > goto_visible_count {
+                    // Find the first local declared after the goto's visible locals
+                    // This is the local at position goto_visible_count in the filtered label locals
+                    let label_visible: Vec<_> = label_locals.iter()
+                        .filter(|(_, lvl)| *lvl <= label_block_level)
+                        .collect();
+                    if let Some((local_name, _)) = label_visible.get(goto_visible_count) {
+                        return Err(LuaError::SyntaxError(format!(
+                            "<goto {}> at line ? jumps into the scope of local '{}'",
+                            label_name, local_name
+                        )));
+                    }
+                }
                 self.patch_jump(goto_pc, target_pc)?;
             } else {
                 return Err(LuaError::SyntaxError(format!(
@@ -431,7 +454,17 @@ impl<'a> Compiler<'a> {
             TokenKind::Local => self.parse_local()?,
             TokenKind::Return => self.parse_return()?,
             TokenKind::Break => self.parse_break()?,
-            TokenKind::Goto => self.parse_goto()?,
+            TokenKind::Goto => {
+                // In LuaJIT mode, 'goto' can be used as an identifier
+                // Check if followed by '=' or ',' (assignment/multi-assign)
+                let next = self.lexer.peek_second()?;
+                if matches!(next.kind, TokenKind::Eq | TokenKind::Comma) {
+                    // Treat as identifier - parse as expression statement
+                    self.parse_expr_stat()?
+                } else {
+                    self.parse_goto()?
+                }
+            }
             TokenKind::ColonColon => self.parse_label()?,
             _ => self.parse_expr_stat()?,
         }
@@ -593,11 +626,13 @@ impl<'a> Compiler<'a> {
         // Reserve slot for loop variable
         let loop_var = self.fs_mut().reserve_reg();
         let start_pc = self.fs().current_pc();
+        let block_level = self.fs().block_level;
         self.fs_mut().locals.push(LocalVar {
             name,
             slot: loop_var,
             start_pc,
             is_captured: false,
+            block_level,
         });
 
         self.lexer.expect(TokenKind::Do)?;
@@ -699,6 +734,7 @@ impl<'a> Compiler<'a> {
         }
 
         // Reserve slots for loop variables
+        let block_level = self.fs().block_level;
         for name in &names {
             let slot = self.fs_mut().reserve_reg();
             let start_pc = self.fs().current_pc();
@@ -707,6 +743,7 @@ impl<'a> Compiler<'a> {
                 slot,
                 start_pc,
                 is_captured: false,
+                block_level,
             });
         }
 
@@ -896,11 +933,13 @@ impl<'a> Compiler<'a> {
             // Reserve slot first (for recursive calls)
             let slot = self.fs_mut().reserve_reg();
             let start_pc = self.fs().current_pc();
+            let block_level = self.fs().block_level;
             self.fs_mut().locals.push(LocalVar {
                 name,
                 slot,
                 start_pc,
                 is_captured: false,
+                block_level,
             });
 
             let proto = self.parse_function_body(false)?;
@@ -1032,12 +1071,14 @@ impl<'a> Compiler<'a> {
 
             // NOW register the locals (after initializers are evaluated)
             let start_pc = self.fs().current_pc();
+            let block_level = self.fs().block_level;
             for (i, name) in names.into_iter().enumerate() {
                 self.fs_mut().locals.push(LocalVar {
                     name,
                     slot: first_slot + i as u8,
                     start_pc,
                     is_captured: false,
+                    block_level,
                 });
             }
         }
@@ -1150,10 +1191,15 @@ impl<'a> Compiler<'a> {
         // Record the goto for later resolution
         let pc = self.fs().current_pc();
         let block_id = self.fs().current_block_id;
+        let block_level = self.fs().block_level;
+        // Store all locals with their block levels for comparison at resolve time
+        let locals_with_levels: Vec<(String, usize)> = self.fs().locals.iter()
+            .map(|l| (l.name.clone(), l.block_level))
+            .collect();
         let line = self.current_line();
         // Emit a placeholder jump that will be patched later
         self.fs_mut().emit(Instruction::adj(Opcode::JMP, 0, 0), line);
-        self.fs_mut().pending_gotos.push((label_name, pc, block_id));
+        self.fs_mut().pending_gotos.push((label_name.clone(), pc, block_id, block_level, locals_with_levels));
         Ok(())
     }
 
@@ -1168,9 +1214,13 @@ impl<'a> Compiler<'a> {
 
         let block_id = self.fs().current_block_id;
         let block_level = self.fs().block_level;
+        // Store all locals with their block levels for comparison at resolve time
+        let locals_with_levels: Vec<(String, usize)> = self.fs().locals.iter()
+            .map(|l| (l.name.clone(), l.block_level))
+            .collect();
 
         // Check for duplicate label at the same block
-        for (name, _, id, _) in &self.fs().labels {
+        for (name, _, id, _, _) in &self.fs().labels {
             if name == &label_name && *id == block_id {
                 return Err(LuaError::SyntaxError(format!(
                     "label '{}' already defined", label_name
@@ -1178,9 +1228,9 @@ impl<'a> Compiler<'a> {
             }
         }
 
-        // Record the label location with block ID and level
+        // Record the label location with block ID, level, and locals
         let pc = self.fs().current_pc();
-        self.fs_mut().labels.push((label_name, pc, block_id, block_level));
+        self.fs_mut().labels.push((label_name, pc, block_id, block_level, locals_with_levels));
         Ok(())
     }
 
@@ -2199,6 +2249,11 @@ impl<'a> Compiler<'a> {
                 self.lexer.next()?;
                 self.resolve_name(&name)
             }
+            TokenKind::Goto => {
+                // In LuaJIT mode, 'goto' can be used as an identifier
+                self.lexer.next()?;
+                self.resolve_name("goto")
+            }
             TokenKind::Nil => {
                 self.lexer.next()?;
                 Ok(ExprDesc::Nil)
@@ -2647,13 +2702,14 @@ impl<'a> Compiler<'a> {
         new_fs.num_params = params.len() as u8;
         new_fs.is_vararg = is_vararg;
 
-        // Add parameters as locals
+        // Add parameters as locals (at block_level 0 - the function body level)
         for (i, name) in params.iter().enumerate() {
             new_fs.locals.push(LocalVar {
                 name: name.clone(),
                 slot: i as u8,
                 start_pc: 0,
                 is_captured: false,
+                block_level: 0,
             });
         }
         new_fs.free_reg = params.len() as u8;
