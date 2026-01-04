@@ -359,7 +359,12 @@ fn lua_select(state: &mut State) -> LuaResult<usize> {
             }
             state.set_top(count);
             Ok(count)
+        } else if i > n - 1 {
+            // Index beyond available args - return nothing (not an error)
+            state.set_top(0);
+            Ok(0)
         } else {
+            // i <= 0 is an error (except for negative indices handled above)
             Err(LuaError::ArgumentError {
                 func: "select".to_string(),
                 arg: 1,
@@ -657,20 +662,37 @@ fn lua_load(state: &mut State) -> LuaResult<usize> {
 fn lua_loadstring(state: &mut State) -> LuaResult<usize> {
     let source_val = state.get_value(1);
 
-    let source = if let Some(s) = source_val.as_string() {
-        let s = unsafe { &*s.as_ptr() };
-        if let Some(str_val) = s.as_str() {
-            str_val.to_string()
-        } else {
-            // Binary string - try to interpret as UTF-8 lossy
-            String::from_utf8_lossy(s.as_bytes()).to_string()
+    let str_ref = source_val.as_string().ok_or_else(|| LuaError::ArgumentError {
+        func: "loadstring".to_string(),
+        arg: 1,
+        msg: "string expected".to_string(),
+    })?;
+
+    let lua_str = unsafe { &*str_ref.as_ptr() };
+    let bytes = lua_str.as_bytes();
+
+    // Check if this is bytecode (starts with our magic) - handle before UTF-8 conversion
+    if bytes.starts_with(crate::stdlib::string::BYTECODE_MAGIC) {
+        match state.load_bytecode(bytes) {
+            Ok(func) => {
+                state.push(Value::function(func))?;
+                return Ok(1);
+            }
+            Err(e) => {
+                state.push(Value::nil())?;
+                let err_msg = state.intern_string(&e.to_string());
+                state.push(err_msg)?;
+                return Ok(2);
+            }
         }
+    }
+
+    // Regular source code - convert to string
+    let source = if let Some(str_val) = lua_str.as_str() {
+        str_val.to_string()
     } else {
-        return Err(LuaError::ArgumentError {
-            func: "loadstring".to_string(),
-            arg: 1,
-            msg: "string expected".to_string(),
-        });
+        // Binary string - try to interpret as UTF-8 lossy
+        String::from_utf8_lossy(bytes).to_string()
     };
 
     let chunk_name = if state.get_top() >= 2 {

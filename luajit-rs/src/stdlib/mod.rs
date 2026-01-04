@@ -4,7 +4,7 @@
 
 mod base;
 mod math;
-mod string;
+pub mod string;
 mod table;
 mod io;
 mod os;
@@ -14,6 +14,7 @@ mod package;
 pub use base::register_base;
 pub use math::register_math;
 pub use string::register_string;
+pub use string::{BYTECODE_MAGIC, load_proto, dump_proto};
 pub use table::register_table;
 pub use io::register_io;
 pub use os::register_os;

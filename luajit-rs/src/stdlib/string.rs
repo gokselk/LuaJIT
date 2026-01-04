@@ -29,6 +29,7 @@ pub fn register_string(state: &mut State) {
     add_func(state, string_table, "match", string_match);
     add_func(state, string_table, "gsub", string_gsub);
     add_func(state, string_table, "gmatch", string_gmatch);
+    add_func(state, string_table, "dump", string_dump);
 
     state.set_global("string", Value::table(string_table));
 }
@@ -621,4 +622,342 @@ fn string_gmatch(state: &mut State) -> LuaResult<usize> {
     let func_ref = state.gc.alloc(crate::value::Function::Native(native));
     state.push(Value::function(func_ref))?;
     Ok(1)
+}
+
+/// string.dump(function [, strip]) -> binary string
+/// Serializes a function's bytecode to a binary string that can be loaded with loadstring.
+fn string_dump(state: &mut State) -> LuaResult<usize> {
+    use crate::value::Function;
+
+    let func_val = state.get_value(1);
+    let _strip = state.get_value(2).as_boolean().unwrap_or(false);
+
+    let func_ref = func_val.as_function().ok_or_else(|| LuaError::ArgumentError {
+        func: "string.dump".to_string(),
+        arg: 1,
+        msg: "function expected".to_string(),
+    })?;
+
+    let func = unsafe { &*func_ref.as_ptr() };
+
+    match func {
+        Function::Native(_) => {
+            return Err(LuaError::RuntimeError(
+                "unable to dump given function".to_string()
+            ));
+        }
+        Function::Lua(closure) => {
+            let proto = unsafe { &*closure.proto.as_ptr() };
+            let bytecode = dump_proto(proto);
+            let result = state.intern_bytes(&bytecode);
+            state.push(result)?;
+            Ok(1)
+        }
+    }
+}
+
+/// Magic bytes for our bytecode format
+pub const BYTECODE_MAGIC: &[u8] = b"\x1bLJR"; // "ESC LJR" - LuaJit Rust
+
+/// Serialize a Proto to binary bytecode
+pub fn dump_proto(proto: &crate::value::Proto) -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    // Write header
+    buf.extend_from_slice(BYTECODE_MAGIC);
+    buf.push(1); // version
+
+    // Write the proto recursively
+    write_proto(&mut buf, proto);
+
+    buf
+}
+
+fn write_u32(buf: &mut Vec<u8>, val: u32) {
+    buf.extend_from_slice(&val.to_le_bytes());
+}
+
+fn write_i32(buf: &mut Vec<u8>, val: i32) {
+    buf.extend_from_slice(&val.to_le_bytes());
+}
+
+fn write_f64(buf: &mut Vec<u8>, val: f64) {
+    buf.extend_from_slice(&val.to_le_bytes());
+}
+
+fn write_string(buf: &mut Vec<u8>, s: &[u8]) {
+    write_u32(buf, s.len() as u32);
+    buf.extend_from_slice(s);
+}
+
+fn write_proto(buf: &mut Vec<u8>, proto: &crate::value::Proto) {
+    // Flags
+    let mut flags: u8 = 0;
+    if proto.is_vararg { flags |= 0x01; }
+    buf.push(flags);
+
+    // Basic info
+    buf.push(proto.num_params);
+    buf.push(proto.max_stack_size);
+    buf.push(proto.num_upvalues);
+
+    // Instructions
+    write_u32(buf, proto.code.len() as u32);
+    for instr in &proto.code {
+        write_u32(buf, instr.raw());
+    }
+
+    // Constants (Value type)
+    write_u32(buf, proto.constants.len() as u32);
+    for constant in &proto.constants {
+        if constant.is_nil() {
+            buf.push(0); // nil
+        } else if let Some(b) = constant.as_boolean() {
+            buf.push(if b { 2 } else { 1 }); // bool
+        } else if let Some(i) = constant.as_integer() {
+            buf.push(3); // integer
+            write_i32(buf, i);
+        } else if let Some(n) = constant.as_number() {
+            buf.push(4); // number
+            write_f64(buf, n);
+        } else {
+            // Treat other types as nil for now
+            buf.push(0);
+        }
+    }
+
+    // String constants
+    write_u32(buf, proto.string_constants.len() as u32);
+    for s in &proto.string_constants {
+        write_string(buf, s);
+    }
+
+    // Nested protos
+    write_u32(buf, proto.protos.len() as u32);
+    for child in &proto.protos {
+        let child_proto = unsafe { &*child.as_ptr() };
+        write_proto(buf, child_proto);
+    }
+
+    // Upvalue descriptors
+    write_u32(buf, proto.upvalues.len() as u32);
+    for uv in &proto.upvalues {
+        buf.push(if uv.in_stack { 1 } else { 0 });
+        buf.push(uv.index);
+    }
+
+    // Line info
+    write_u32(buf, proto.line_defined);
+    write_u32(buf, proto.last_line_defined);
+
+    // Source name
+    if let Some(src) = proto.source {
+        let src_str = unsafe { &*src.as_ptr() };
+        write_string(buf, src_str.as_bytes());
+    } else {
+        write_u32(buf, 0); // empty source
+    }
+
+    // Lineinfo (for debug)
+    write_u32(buf, proto.lineinfo.len() as u32);
+    for &line in &proto.lineinfo {
+        write_u32(buf, line);
+    }
+}
+
+/// Load a Proto from bytecode
+pub fn load_proto(bytes: &[u8]) -> LuaResult<crate::value::Proto> {
+    use crate::value::Proto;
+    use crate::bytecode::Instruction;
+
+    let mut cursor = 0;
+
+    // Check magic
+    if bytes.len() < BYTECODE_MAGIC.len() + 1 {
+        return Err(LuaError::RuntimeError("invalid bytecode".to_string()));
+    }
+    if &bytes[..BYTECODE_MAGIC.len()] != BYTECODE_MAGIC {
+        return Err(LuaError::RuntimeError("invalid bytecode magic".to_string()));
+    }
+    cursor += BYTECODE_MAGIC.len();
+
+    // Check version
+    if bytes[cursor] != 1 {
+        return Err(LuaError::RuntimeError("unsupported bytecode version".to_string()));
+    }
+    cursor += 1;
+
+    read_proto(bytes, &mut cursor)
+}
+
+fn read_u32(bytes: &[u8], cursor: &mut usize) -> LuaResult<u32> {
+    if *cursor + 4 > bytes.len() {
+        return Err(LuaError::RuntimeError("truncated bytecode".to_string()));
+    }
+    let val = u32::from_le_bytes([
+        bytes[*cursor],
+        bytes[*cursor + 1],
+        bytes[*cursor + 2],
+        bytes[*cursor + 3],
+    ]);
+    *cursor += 4;
+    Ok(val)
+}
+
+fn read_i32(bytes: &[u8], cursor: &mut usize) -> LuaResult<i32> {
+    if *cursor + 4 > bytes.len() {
+        return Err(LuaError::RuntimeError("truncated bytecode".to_string()));
+    }
+    let val = i32::from_le_bytes([
+        bytes[*cursor],
+        bytes[*cursor + 1],
+        bytes[*cursor + 2],
+        bytes[*cursor + 3],
+    ]);
+    *cursor += 4;
+    Ok(val)
+}
+
+fn read_f64(bytes: &[u8], cursor: &mut usize) -> LuaResult<f64> {
+    if *cursor + 8 > bytes.len() {
+        return Err(LuaError::RuntimeError("truncated bytecode".to_string()));
+    }
+    let val = f64::from_le_bytes([
+        bytes[*cursor],
+        bytes[*cursor + 1],
+        bytes[*cursor + 2],
+        bytes[*cursor + 3],
+        bytes[*cursor + 4],
+        bytes[*cursor + 5],
+        bytes[*cursor + 6],
+        bytes[*cursor + 7],
+    ]);
+    *cursor += 8;
+    Ok(val)
+}
+
+fn read_bytes(bytes: &[u8], cursor: &mut usize) -> LuaResult<Vec<u8>> {
+    let len = read_u32(bytes, cursor)? as usize;
+    if *cursor + len > bytes.len() {
+        return Err(LuaError::RuntimeError("truncated bytecode".to_string()));
+    }
+    let data = bytes[*cursor..*cursor + len].to_vec();
+    *cursor += len;
+    Ok(data)
+}
+
+fn read_proto(bytes: &[u8], cursor: &mut usize) -> LuaResult<crate::value::Proto> {
+    use crate::value::{Proto, UpvalueDesc, Value};
+    use crate::bytecode::Instruction;
+
+    if *cursor >= bytes.len() {
+        return Err(LuaError::RuntimeError("truncated bytecode".to_string()));
+    }
+
+    // Flags
+    let flags = bytes[*cursor];
+    *cursor += 1;
+    let is_vararg = flags & 0x01 != 0;
+
+    // Basic info
+    if *cursor + 3 > bytes.len() {
+        return Err(LuaError::RuntimeError("truncated bytecode".to_string()));
+    }
+    let num_params = bytes[*cursor];
+    let max_stack_size = bytes[*cursor + 1];
+    let num_upvalues = bytes[*cursor + 2];
+    *cursor += 3;
+
+    // Instructions
+    let num_instructions = read_u32(bytes, cursor)? as usize;
+    let mut code = Vec::with_capacity(num_instructions);
+    for _ in 0..num_instructions {
+        let raw = read_u32(bytes, cursor)?;
+        code.push(Instruction(raw));
+    }
+
+    // Constants
+    let num_constants = read_u32(bytes, cursor)? as usize;
+    let mut constants = Vec::with_capacity(num_constants);
+    for _ in 0..num_constants {
+        if *cursor >= bytes.len() {
+            return Err(LuaError::RuntimeError("truncated bytecode".to_string()));
+        }
+        let tag = bytes[*cursor];
+        *cursor += 1;
+        let val = match tag {
+            0 => Value::nil(),
+            1 => Value::boolean(false),
+            2 => Value::boolean(true),
+            3 => Value::integer(read_i32(bytes, cursor)?),
+            4 => Value::number(read_f64(bytes, cursor)?),
+            _ => Value::nil(),
+        };
+        constants.push(val);
+    }
+
+    // String constants
+    let num_string_constants = read_u32(bytes, cursor)? as usize;
+    let mut string_constants = Vec::with_capacity(num_string_constants);
+    for _ in 0..num_string_constants {
+        string_constants.push(read_bytes(bytes, cursor)?);
+    }
+
+    // Nested protos (as child_protos for allocation later)
+    let num_protos = read_u32(bytes, cursor)? as usize;
+    let mut child_protos = Vec::with_capacity(num_protos);
+    for _ in 0..num_protos {
+        let child = read_proto(bytes, cursor)?;
+        child_protos.push(Box::new(child));
+    }
+
+    // Upvalue descriptors
+    let num_uv_desc = read_u32(bytes, cursor)? as usize;
+    let mut upvalues = Vec::with_capacity(num_uv_desc);
+    for _ in 0..num_uv_desc {
+        if *cursor + 2 > bytes.len() {
+            return Err(LuaError::RuntimeError("truncated bytecode".to_string()));
+        }
+        let in_stack = bytes[*cursor] != 0;
+        let index = bytes[*cursor + 1];
+        *cursor += 2;
+        upvalues.push(UpvalueDesc {
+            in_stack,
+            index,
+            name: None,
+        });
+    }
+
+    // Line info
+    let line_defined = read_u32(bytes, cursor)?;
+    let last_line_defined = read_u32(bytes, cursor)?;
+
+    // Source name (we don't intern it here - just store raw bytes)
+    let source_bytes = read_bytes(bytes, cursor)?;
+
+    // Lineinfo array
+    let num_lineinfo = read_u32(bytes, cursor)? as usize;
+    let mut lineinfo = Vec::with_capacity(num_lineinfo);
+    for _ in 0..num_lineinfo {
+        lineinfo.push(read_u32(bytes, cursor)?);
+    }
+
+    // Build the proto - note: source is None, will be set by allocate_proto_tree if needed
+    let mut proto = Proto::new();
+    proto.code = code;
+    proto.constants = constants;
+    proto.string_constants = string_constants;
+    proto.child_protos = child_protos;
+    proto.upvalues = upvalues;
+    proto.lineinfo = lineinfo;
+    proto.num_params = num_params;
+    proto.is_vararg = is_vararg;
+    proto.max_stack_size = max_stack_size;
+    proto.num_upvalues = num_upvalues;
+    proto.line_defined = line_defined;
+    proto.last_line_defined = last_line_defined;
+    // Store source bytes in string_constants if not empty, for potential re-serialization
+    // For now, we leave source as None since we don't have access to the GC here
+
+    Ok(proto)
 }

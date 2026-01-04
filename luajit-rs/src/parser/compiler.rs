@@ -223,6 +223,10 @@ pub struct Compiler<'a> {
     /// Stack of function states (for nested functions)
     functions: Vec<FunctionState>,
     chunk_name: String,
+    /// Target hint for function calls - when set, calls should try to place
+    /// their function at this register so results land at the right position
+    /// for varargs passing.
+    call_target_hint: Option<u8>,
 }
 
 impl<'a> Compiler<'a> {
@@ -231,6 +235,7 @@ impl<'a> Compiler<'a> {
             lexer,
             functions: vec![FunctionState::new()],
             chunk_name: chunk_name.to_string(),
+            call_target_hint: None,
         }
     }
 
@@ -1098,6 +1103,13 @@ impl<'a> Compiler<'a> {
         };
         self.lexer.expect(TokenKind::ColonColon)?;
 
+        // Check for duplicate label in the same scope
+        if self.fs().labels.contains_key(&label_name) {
+            return Err(LuaError::SyntaxError(format!(
+                "label '{}' already defined", label_name
+            )));
+        }
+
         // Record the label location
         let pc = self.fs().current_pc();
         self.fs_mut().labels.insert(label_name, pc);
@@ -1789,7 +1801,9 @@ impl<'a> Compiler<'a> {
                     can_have_suffix = true;
                 }
                 TokenKind::LParen | TokenKind::LBrace | TokenKind::String(_) => {
-                    expr = self.parse_call_expr(expr, false)?;
+                    // Use call_target_hint if set, to place function at the right position
+                    let target = self.call_target_hint.take();
+                    expr = self.parse_call_expr_with_target(expr, false, target)?;
                     can_have_suffix = true;
                 }
                 _ => break,
@@ -1799,15 +1813,41 @@ impl<'a> Compiler<'a> {
         Ok(expr)
     }
 
-    fn parse_call_expr(&mut self, func: ExprDesc, _is_method: bool) -> LuaResult<ExprDesc> {
+    /// Parse a call expression with an optional target hint.
+    /// When target_hint is Some(reg), we try to place the call at that register
+    /// so that results naturally land where they're needed for varargs.
+    fn parse_call_expr_with_target(&mut self, func: ExprDesc, _is_method: bool, target_hint: Option<u8>) -> LuaResult<ExprDesc> {
         let line = self.current_line();
 
-        // Move function to a contiguous register block at free_reg.
-        // This ensures arguments can be placed immediately after the function.
-        let base = self.fs().free_reg;
-        self.expr_to_reg(func, base)?;
-        // Set free_reg to base + 1 so arguments go immediately after function
-        self.fs_mut().free_reg = base + 1;
+        // If we have a target hint, use it; otherwise use free_reg
+        let base = target_hint.unwrap_or(self.fs().free_reg);
+
+        // For Index expressions with a target hint, we can place the function at the target
+        // position by reusing the table's register for arguments after getting the function
+        if target_hint.is_some() {
+            match &func {
+                ExprDesc::Index { table, key, key_is_const: true } => {
+                    // Get function to target position, table's register can be reused for args
+                    self.fs_mut().emit(Instruction::abc(Opcode::TGETS, base, *table, *key), line);
+                    self.fs_mut().free_reg = base + 1;
+                }
+                ExprDesc::Index { table, key, key_is_const: false } => {
+                    self.fs_mut().emit(Instruction::abc(Opcode::TGETV, base, *table, *key), line);
+                    self.fs_mut().free_reg = base + 1;
+                }
+                _ => {
+                    // For other expressions, place function at base
+                    self.expr_to_reg(func.clone(), base)?;
+                    self.fs_mut().free_reg = base + 1;
+                }
+            }
+        } else {
+            // Move function to a contiguous register block at free_reg.
+            // This ensures arguments can be placed immediately after the function.
+            self.expr_to_reg(func, base)?;
+            // Set free_reg to base + 1 so arguments go immediately after function
+            self.fs_mut().free_reg = base + 1;
+        }
 
         // Track if last arg is a call or vararg (for variable args)
         let mut last_call_pc: Option<usize> = None;
@@ -1821,7 +1861,12 @@ impl<'a> Compiler<'a> {
                     loop {
                         // Target register for this argument
                         let target = self.fs().free_reg;
+                        // Set hint so that if this argument is a function call,
+                        // it will be placed at the target position
+                        self.call_target_hint = Some(target);
                         let arg = self.parse_expression()?;
+                        // Clear hint after parsing
+                        self.call_target_hint = None;
 
                         // Check if this is a call or vararg expression (might be last arg)
                         let call_base = match &arg {
@@ -1948,7 +1993,12 @@ impl<'a> Compiler<'a> {
                 if !self.lexer.check(&TokenKind::RParen)? {
                     loop {
                         let target = self.fs().free_reg;
+                        // Set hint so that if this argument is a function call,
+                        // it will be placed at the target position
+                        self.call_target_hint = Some(target);
                         let arg = self.parse_expression()?;
+                        // Clear hint after parsing
+                        self.call_target_hint = None;
 
                         // Check if this is a call or vararg expression (might be last arg)
                         match &arg {
@@ -2306,7 +2356,7 @@ impl<'a> Compiler<'a> {
                                     };
                                 }
                                 TokenKind::LParen | TokenKind::LBrace | TokenKind::String(_) => {
-                                    expr = self.parse_call_expr(expr, false)?;
+                                    expr = self.parse_call_expr_with_target(expr, false, None)?;
                                 }
                                 TokenKind::Colon => {
                                     self.lexer.next()?;

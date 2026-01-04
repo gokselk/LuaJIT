@@ -278,9 +278,24 @@ impl State {
         self.push(Value::table(table))
     }
 
-    /// Load and compile a chunk
+    /// Load and compile a chunk (source code or bytecode)
     pub fn load_string(&mut self, source: &str, chunk_name: &str) -> LuaResult<GcRef<Function>> {
+        // Check if this is bytecode (starts with our magic)
+        let bytes = source.as_bytes();
+        if bytes.starts_with(crate::stdlib::string::BYTECODE_MAGIC) {
+            return self.load_bytecode(bytes);
+        }
+
         let proto = crate::parser::parse(source, chunk_name)?;
+        let proto_ref = self.allocate_proto_tree(proto);
+        let closure = Closure::new(proto_ref, Some(self.globals));
+        let func = Function::Lua(closure);
+        Ok(self.gc.alloc(func))
+    }
+
+    /// Load bytecode from a binary buffer
+    pub fn load_bytecode(&mut self, bytes: &[u8]) -> LuaResult<GcRef<Function>> {
+        let proto = crate::stdlib::string::load_proto(bytes)?;
         let proto_ref = self.allocate_proto_tree(proto);
         let closure = Closure::new(proto_ref, Some(self.globals));
         let func = Function::Lua(closure);

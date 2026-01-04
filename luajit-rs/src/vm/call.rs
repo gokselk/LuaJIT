@@ -155,6 +155,11 @@ impl CallStack {
         self.frames.len()
     }
 
+    /// Get all frames as a slice
+    pub fn frames(&self) -> &[CallFrame] {
+        &self.frames
+    }
+
     /// Check if call stack is empty
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
