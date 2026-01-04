@@ -773,9 +773,15 @@ impl<'a> Compiler<'a> {
                 line,
             );
         } else {
-            // Assign to global
-            let name_idx = self.fs_mut().add_string_constant(&first_name);
-            self.fs_mut().emit(Instruction::ad(Opcode::GSET, func_reg, name_idx as u16), line);
+            // Check if it's a local variable first
+            if let Some(slot) = self.fs().find_local(&first_name) {
+                // Assign to local
+                self.fs_mut().emit(Instruction::ad(Opcode::MOV, slot, func_reg as u16), line);
+            } else {
+                // Assign to global
+                let name_idx = self.fs_mut().add_string_constant(&first_name);
+                self.fs_mut().emit(Instruction::ad(Opcode::GSET, func_reg, name_idx as u16), line);
+            }
         }
         self.fs_mut().free_regs(1);
 
