@@ -69,10 +69,16 @@ struct FunctionState {
     loop_start: Option<usize>,
     /// Block nesting level
     block_level: usize,
-    /// Labels: name -> PC
-    labels: std::collections::HashMap<String, usize>,
-    /// Pending gotos: (name, PC of JMP instruction)
-    pending_gotos: Vec<(String, usize)>,
+    /// Next unique block ID
+    next_block_id: usize,
+    /// Current block ID
+    current_block_id: usize,
+    /// Block parent map: block_id -> parent_block_id
+    block_parents: Vec<usize>,
+    /// Labels: Vec of (name, PC, block_id, block_level)
+    labels: Vec<(String, usize, usize, usize)>,
+    /// Pending gotos: (name, PC of JMP instruction, block_id)
+    pending_gotos: Vec<(String, usize, usize)>,
 }
 
 impl FunctionState {
@@ -88,7 +94,10 @@ impl FunctionState {
             break_jumps: Vec::new(),
             loop_start: None,
             block_level: 0,
-            labels: std::collections::HashMap::new(),
+            next_block_id: 1,
+            current_block_id: 0,
+            block_parents: vec![0], // block 0 has no parent (points to itself)
+            labels: Vec::new(),
             pending_gotos: Vec::new(),
         }
     }
@@ -288,9 +297,47 @@ impl<'a> Compiler<'a> {
     fn resolve_gotos(&mut self) -> LuaResult<()> {
         let pending_gotos = std::mem::take(&mut self.fs_mut().pending_gotos);
         let labels = self.fs().labels.clone();
+        let block_parents = self.fs().block_parents.clone();
 
-        for (label_name, goto_pc) in pending_gotos {
-            if let Some(&target_pc) = labels.get(&label_name) {
+        // Helper: check if label_block is an ancestor of (or equal to) goto_block
+        let is_visible = |label_block: usize, goto_block: usize| -> bool {
+            let mut current = goto_block;
+            loop {
+                if current == label_block {
+                    return true;
+                }
+                if current == 0 {
+                    return label_block == 0;
+                }
+                let parent = block_parents.get(current).copied().unwrap_or(0);
+                if parent == current {
+                    // Reached root
+                    return label_block == 0;
+                }
+                current = parent;
+            }
+        };
+
+        for (label_name, goto_pc, goto_block) in pending_gotos {
+            // Find a visible label - prefer the innermost one (highest level)
+            // A label is visible if its block is an ancestor of (or same as) the goto's block
+            let mut best_match: Option<usize> = None;
+            let mut best_level: Option<usize> = None;
+
+            for (name, target_pc, label_block, label_level) in &labels {
+                if name == &label_name {
+                    // Check if this label is visible from the goto
+                    if is_visible(*label_block, goto_block) {
+                        // Prefer the innermost visible label (highest level)
+                        if best_level.is_none() || *label_level > best_level.unwrap() {
+                            best_match = Some(*target_pc);
+                            best_level = Some(*label_level);
+                        }
+                    }
+                }
+            }
+
+            if let Some(target_pc) = best_match {
                 self.patch_jump(goto_pc, target_pc)?;
             } else {
                 return Err(LuaError::SyntaxError(format!(
@@ -307,6 +354,17 @@ impl<'a> Compiler<'a> {
         self.fs_mut().block_level += 1;
         let initial_locals = self.fs().locals.len();
 
+        // Assign a unique block ID for this block
+        let parent_block_id = self.fs().current_block_id;
+        let this_block_id = self.fs().next_block_id;
+        self.fs_mut().next_block_id += 1;
+        self.fs_mut().current_block_id = this_block_id;
+        // Record this block's parent
+        while self.fs().block_parents.len() <= this_block_id {
+            self.fs_mut().block_parents.push(0);
+        }
+        self.fs_mut().block_parents[this_block_id] = parent_block_id;
+
         loop {
             if self.check_block_end()? {
                 break;
@@ -320,6 +378,10 @@ impl<'a> Compiler<'a> {
             self.close_locals(initial_locals);
         }
 
+        // Note: We don't remove labels here - resolve_gotos uses block_parents to check visibility
+
+        // Restore parent block ID
+        self.fs_mut().current_block_id = parent_block_id;
         self.fs_mut().block_level -= 1;
         Ok(())
     }
@@ -1087,10 +1149,11 @@ impl<'a> Compiler<'a> {
 
         // Record the goto for later resolution
         let pc = self.fs().current_pc();
+        let block_id = self.fs().current_block_id;
         let line = self.current_line();
         // Emit a placeholder jump that will be patched later
         self.fs_mut().emit(Instruction::adj(Opcode::JMP, 0, 0), line);
-        self.fs_mut().pending_gotos.push((label_name, pc));
+        self.fs_mut().pending_gotos.push((label_name, pc, block_id));
         Ok(())
     }
 
@@ -1103,16 +1166,21 @@ impl<'a> Compiler<'a> {
         };
         self.lexer.expect(TokenKind::ColonColon)?;
 
-        // Check for duplicate label in the same scope
-        if self.fs().labels.contains_key(&label_name) {
-            return Err(LuaError::SyntaxError(format!(
-                "label '{}' already defined", label_name
-            )));
+        let block_id = self.fs().current_block_id;
+        let block_level = self.fs().block_level;
+
+        // Check for duplicate label at the same block
+        for (name, _, id, _) in &self.fs().labels {
+            if name == &label_name && *id == block_id {
+                return Err(LuaError::SyntaxError(format!(
+                    "label '{}' already defined", label_name
+                )));
+            }
         }
 
-        // Record the label location
+        // Record the label location with block ID and level
         let pc = self.fs().current_pc();
-        self.fs_mut().labels.insert(label_name, pc);
+        self.fs_mut().labels.push((label_name, pc, block_id, block_level));
         Ok(())
     }
 
@@ -1357,6 +1425,12 @@ impl<'a> Compiler<'a> {
             self.lexer.next()?;
 
             let left_reg = self.expr_to_register(left)?;
+            // Ensure free_reg is past left_reg so right side doesn't clobber it
+            if self.fs().free_reg <= left_reg {
+                self.fs_mut().free_reg = left_reg + 1;
+            }
+            // Clear any call target hint to prevent nested calls from using wrong target
+            self.call_target_hint = None;
             let right = self.parse_concat_expr()?;
             let right_reg = self.expr_to_register(right)?;
 
@@ -1606,6 +1680,12 @@ impl<'a> Compiler<'a> {
             self.lexer.next()?;
 
             let left_reg = self.expr_to_register(left)?;
+            // Ensure free_reg is past left_reg so right side doesn't clobber it
+            if self.fs().free_reg <= left_reg {
+                self.fs_mut().free_reg = left_reg + 1;
+            }
+            // Clear any call target hint to prevent nested calls from using wrong target
+            self.call_target_hint = None;
             let right = self.parse_concat_expr()?;
             let right_reg = self.expr_to_register(right)?;
 
