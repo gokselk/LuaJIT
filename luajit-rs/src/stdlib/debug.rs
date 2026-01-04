@@ -422,22 +422,104 @@ fn debug_getinfo(state: &mut State) -> LuaResult<usize> {
     Ok(1)
 }
 
+/// Hook mask constants
+pub const HOOK_CALL: u8 = 1;
+pub const HOOK_RET: u8 = 2;
+pub const HOOK_LINE: u8 = 4;
+pub const HOOK_COUNT: u8 = 8;
+
 /// debug.sethook([thread,] hook, mask [, count]) -> ()
 /// Sets the hook function for the current thread.
 fn debug_sethook(state: &mut State) -> LuaResult<usize> {
-    // For now, we just accept and ignore hooks
-    // Full hook implementation requires interpreter modifications
+    let nargs = state.get_top();
+
+    // Parse arguments - could be (hook, mask, count) or (nil)
+    if nargs == 0 || state.get_value(1).is_nil() {
+        // Clear hook
+        state.hook = None;
+        state.hook_mask = 0;
+        state.base_hook_count = 0;
+        state.hook_count = 0;
+        return Ok(0);
+    }
+
+    // Get hook function
+    let hook_val = state.get_value(1);
+    let hook_func = hook_val.as_function().ok_or_else(|| LuaError::ArgumentError {
+        func: "sethook".to_string(),
+        arg: 1,
+        msg: "function expected".to_string(),
+    })?;
+
+    // Get mask string
+    let mask_str = if nargs >= 2 {
+        let v = state.get_value(2);
+        if let Some(s) = v.as_string() {
+            unsafe { (*s.as_ptr()).as_str().unwrap_or("").to_string() }
+        } else {
+            "".to_string()
+        }
+    } else {
+        "".to_string()
+    };
+
+    // Parse mask string into flags
+    let mut mask: u8 = 0;
+    for c in mask_str.chars() {
+        match c {
+            'c' => mask |= HOOK_CALL,
+            'r' => mask |= HOOK_RET,
+            'l' => mask |= HOOK_LINE,
+            _ => {}
+        }
+    }
+
+    // Get count
+    let count = if nargs >= 3 {
+        state.to_integer(3).unwrap_or(0) as u32
+    } else {
+        0
+    };
+
+    if count > 0 {
+        mask |= HOOK_COUNT;
+    }
+
+    // Set the hook
+    state.hook = Some(hook_func);
+    state.hook_mask = mask;
+    state.base_hook_count = count;
+    state.hook_count = count;
+
     Ok(0)
 }
 
 /// debug.gethook([thread]) -> hook, mask, count
 /// Returns the current hook settings.
 fn debug_gethook(state: &mut State) -> LuaResult<usize> {
-    // Return nil, empty mask, 0 count (no hook set)
-    state.push(Value::nil())?;
-    let empty = state.intern_string("");
-    state.push(empty)?;
-    state.push(Value::integer(0))?;
+    // Return hook function (or nil)
+    if let Some(hook) = state.hook {
+        state.push(Value::function(hook))?;
+    } else {
+        state.push(Value::nil())?;
+    }
+
+    // Build mask string
+    let mut mask_str = String::new();
+    if state.hook_mask & HOOK_CALL != 0 {
+        mask_str.push('c');
+    }
+    if state.hook_mask & HOOK_RET != 0 {
+        mask_str.push('r');
+    }
+    if state.hook_mask & HOOK_LINE != 0 {
+        mask_str.push('l');
+    }
+    let mask_val = state.intern_string(&mask_str);
+    state.push(mask_val)?;
+
+    // Return count
+    state.push(Value::integer(state.base_hook_count as i32))?;
     Ok(3)
 }
 

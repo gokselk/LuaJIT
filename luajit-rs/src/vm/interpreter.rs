@@ -665,6 +665,50 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Call the line hook if enabled
+    fn call_line_hook(&mut self, line: i32) -> LuaResult<()> {
+        use crate::stdlib::debug::HOOK_LINE;
+
+        if !self.state.allow_hook || (self.state.hook_mask & HOOK_LINE) == 0 {
+            return Ok(());
+        }
+
+        if let Some(hook_func) = self.state.hook {
+            // Prevent recursive hook calls
+            self.state.allow_hook = false;
+
+            // Save last_hook_line (hook runs in different function context)
+            let saved_last_hook_line = self.state.last_hook_line;
+            self.state.last_hook_line = -1;
+
+            // Save stack state
+            let saved_top = self.state.stack.top();
+
+            // Push hook function, event name, line number
+            self.state.push(Value::function(hook_func))?;
+            let event_str = self.state.intern_string("line");
+            self.state.push(event_str)?;
+            self.state.push(Value::integer(line))?;
+
+            // Call hook
+            let call_idx = saved_top;
+            let result = self.call(call_idx, 2, 0);
+
+            // Restore stack top
+            self.state.stack.set_top(saved_top);
+
+            // Restore last_hook_line (but don't trigger hook on return)
+            self.state.last_hook_line = saved_last_hook_line;
+
+            // Re-enable hooks
+            self.state.allow_hook = true;
+
+            result?;
+        }
+
+        Ok(())
+    }
+
     /// Main execution loop
     fn execute(&mut self) -> LuaResult<()> {
         loop {
@@ -678,10 +722,38 @@ impl<'a> Interpreter<'a> {
                 None => return Err(LuaError::RuntimeError("instruction fetch failed".to_string())),
             };
 
+            // Extract current line for line hooks (before we drop the frame borrow)
+            let current_line = if self.state.hook_mask != 0 {
+                if let Some(closure) = frame.closure {
+                    let proto = unsafe { &*(*closure.as_ptr()).proto.as_ptr() };
+                    let pc = frame.pc.saturating_sub(1); // fetch already incremented pc
+                    if pc < proto.lineinfo.len() {
+                        proto.lineinfo[pc] as i32
+                    } else {
+                        -1
+                    }
+                } else {
+                    -1
+                }
+            } else {
+                -1
+            };
+
             let base = frame.base;
             let func_idx = frame.func_idx;
             let op = instr.opcode();
             let a = instr.a() as usize;
+
+            // Check for line hooks - call after extracting info but before executing
+            // Only call if hooks are enabled and line actually changed
+            if current_line > 0
+                && current_line != self.state.last_hook_line
+                && self.state.allow_hook
+                && (self.state.hook_mask & 4) != 0  // HOOK_LINE = 4
+            {
+                self.state.last_hook_line = current_line;
+                self.call_line_hook(current_line)?;
+            }
 
             match op {
                 // Move and load operations

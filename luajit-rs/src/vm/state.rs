@@ -56,6 +56,8 @@ pub struct State {
     pub finalizable_userdata: Vec<*mut Userdata>,
     /// Current GC trigger context (e.g., "__concat" when GC is triggered during CAT)
     pub gc_trigger_context: Option<String>,
+    /// Last line number for line hooks
+    pub last_hook_line: i32,
 }
 
 /// Thread/coroutine status
@@ -102,6 +104,7 @@ impl State {
             call_name_what: None,
             finalizable_userdata: Vec::new(),
             gc_trigger_context: None,
+            last_hook_line: -1,
         };
 
         // Initialize standard globals

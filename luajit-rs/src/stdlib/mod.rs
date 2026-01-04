@@ -8,7 +8,7 @@ pub mod string;
 mod table;
 mod io;
 mod os;
-mod debug;
+pub mod debug;
 mod package;
 mod coroutine;
 

@@ -787,9 +787,10 @@ impl GarbageCollector {
 
         // Trigger GC based on allocation count or memory threshold
 
-        // Simple threshold-based triggering - use lower threshold for more frequent collection
-        // Trigger after 10 allocations or when memory exceeds threshold
-        if self.memory_used > self.threshold || self.alloc_count > 10 {
+        // Threshold-based triggering - trigger only when memory exceeds threshold
+        // or after many allocations to avoid O(n²) behavior in tight loops
+        // Note: 10 allocations was WAY too aggressive - 1000 is reasonable
+        if self.memory_used > self.threshold || self.alloc_count > 1000 {
             // Would do incremental work here
             // For now, signal that a full collection is needed
             return true;
