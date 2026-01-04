@@ -1177,7 +1177,35 @@ impl<'a> Compiler<'a> {
 
         // Check if there's only one return value
         if !self.lexer.check(&TokenKind::Comma)? {
-            // Single return value - figure out the register first
+            // Check for tail call optimization:
+            // If returning a single function call and no upvalues need closing,
+            // convert CALL to CALLT
+            if let ExprDesc::Call(base, _, call_pc) = first_expr {
+                // Check if any locals are captured - if so, we can't do tail call
+                // because we need to close upvalues
+                let has_captured = self.fs().locals.iter().any(|l| l.is_captured);
+                if !has_captured {
+                    // Tail call optimization: patch CALL to CALLT
+                    let instr = self.fs().proto.code[call_pc];
+                    let op = instr.opcode();
+                    let a = instr.a();
+                    let b = instr.b();
+                    // Convert CALL/CALLM to CALLT/CALLMT
+                    // Keep ABC format - CALLT uses B for nargs, same as CALL
+                    let new_op = match op {
+                        Opcode::CALL => Opcode::CALLT,
+                        Opcode::CALLM => Opcode::CALLMT,
+                        _ => op, // Shouldn't happen
+                    };
+                    // CALLT/CALLMT use same encoding as CALL/CALLM (ABC format)
+                    // C field is not used for CALLT (results go to caller)
+                    self.fs_mut().proto.code[call_pc] = Instruction::abc(new_op, a, b, 0);
+                    // No RET needed - CALLT handles the return
+                    return Ok(());
+                }
+            }
+
+            // Non-tail-call return
             let ret_reg = match first_expr {
                 ExprDesc::Register(r) => r,
                 ExprDesc::Call(base, _, _) => base,

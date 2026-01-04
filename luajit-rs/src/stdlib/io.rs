@@ -189,6 +189,8 @@ impl FileHandle {
 
 
 pub fn register_io(state: &mut State) {
+    // Note: GC is disabled by register_all() before calling this function
+
     // Create io table
     let io_table = state.create_table(0, 16);
 

@@ -1183,10 +1183,11 @@ impl<'a> Interpreter<'a> {
                     let result = self.call(base + a, nargs, nresults);
                     self.state.is_method_call = false;
                     result?;
+
                 }
 
                 Opcode::CALLT => {
-                    // Tail call
+                    // Tail call - must not grow Rust call stack for Lua-to-Lua calls
                     let b = instr.b() as usize;
                     let nargs = if b == 0 {
                         self.state.stack.top() - base - a - 1
@@ -1194,19 +1195,95 @@ impl<'a> Interpreter<'a> {
                         b - 1
                     };
 
-                    // Move function and args to base - 1
-                    let dst = base - 1;
-                    for i in 0..=nargs {
-                        let val = self.state.stack.get(base + a + i);
-                        self.state.stack.set(dst + i, val);
+                    // Get the function to call
+                    let func = self.state.stack.get(base + a);
+
+                    // Handle the tail call based on function type
+                    match func.as_function() {
+                        Some(func_ref) => unsafe {
+                            match &*func_ref.as_ptr() {
+                                Function::Lua(c) => {
+                                    // TRUE tail call optimization for Lua functions
+                                    // Move function and args to replace current frame
+                                    for i in 0..=nargs {
+                                        let val = self.state.stack.get(base + a + i);
+                                        self.state.stack.set(func_idx + i, val);
+                                    }
+
+                                    // Get parent frame's expected results before popping
+                                    self.state.call_stack.pop();
+                                    let parent_frame = self.state.call_stack.current();
+                                    let nresults = parent_frame.map(|f| f.num_results).unwrap_or(-1);
+
+                                    // Set up new Lua frame and continue loop (no recursion!)
+                                    let closure = GcRef::new(c as *const Closure as *mut Closure);
+                                    let proto = &*(*closure.as_ptr()).proto.as_ptr();
+                                    let arg_base = func_idx + 1;
+                                    let num_params = proto.num_params as usize;
+
+                                    // Handle varargs
+                                    let (new_base, vararg_base, vararg_count) = if proto.is_vararg {
+                                        let vcount = if nargs > num_params { nargs - num_params } else { 0 };
+                                        let vbase = arg_base + num_params;
+                                        let frame_base = arg_base + nargs.max(num_params);
+                                        for i in 0..num_params.min(nargs) {
+                                            let val = self.state.stack.get(arg_base + i);
+                                            self.state.stack.set(frame_base + i, val);
+                                        }
+                                        for i in nargs..num_params {
+                                            self.state.stack.set(frame_base + i, Value::nil());
+                                        }
+                                        (frame_base, Some(vbase), vcount)
+                                    } else {
+                                        for i in nargs..num_params {
+                                            self.state.stack.set(arg_base + i, Value::nil());
+                                        }
+                                        (arg_base, None, 0)
+                                    };
+
+                                    // Create and push new frame
+                                    let mut new_frame = CallFrame::new_lua(closure, new_base, func_idx, nresults);
+                                    new_frame.vararg_base = vararg_base;
+                                    new_frame.vararg_count = vararg_count;
+                                    new_frame.top = new_base + proto.max_stack_size as usize;
+
+                                    self.state.stack.set_base(new_base);
+                                    self.state.stack.set_top(new_frame.top);
+                                    self.state.call_stack.push(new_frame)?;
+
+                                    // Continue the loop - this is the TCO magic!
+                                    continue;
+                                }
+                                Function::Native(_) => {
+                                    // For native tail calls, we can't do true TCO
+                                    // But native calls don't grow the Lua call stack much
+                                    // Just do a normal call and return the result
+                                    self.call_native(base + a, nargs, 1)?;
+                                    // Get the result and return it
+                                    let result = self.state.stack.get(base + a);
+                                    self.state.stack.set(func_idx, result);
+                                    return self.do_return(func_idx, 1);
+                                }
+                            }
+                        },
+                        None => {
+                            // Try __call metamethod
+                            if let Some(mm) = self.get_metamethod(&func, "__call") {
+                                // Shift args to make room for the object
+                                for i in (0..=nargs).rev() {
+                                    let val = self.state.stack.get(base + a + i);
+                                    self.state.stack.set(base + a + i + 1, val);
+                                }
+                                self.state.stack.set(base + a, mm);
+                                // Now recursively call CALLT logic with the metamethod
+                                self.call(base + a, nargs + 1, 1)?;
+                                let result = self.state.stack.get(base + a);
+                                self.state.stack.set(func_idx, result);
+                                return self.do_return(func_idx, 1);
+                            }
+                            return Err(LuaError::CallError(func.lua_type()));
+                        }
                     }
-
-                    // Pop current frame and call
-                    self.state.call_stack.pop();
-                    let frame = self.state.call_stack.current().unwrap();
-                    let nresults = frame.num_results;
-
-                    return self.call(dst, nargs, nresults);
                 }
 
                 // Return operations

@@ -488,13 +488,59 @@ impl State {
         // === PHASE 2: Handle userdata finalization ===
         let mut reachable_ud: HashSet<*mut Userdata> = HashSet::new();
 
-        // Scan entire stack for userdata
-        for i in 0..self.stack.top() {
-            let val = self.stack.get(i);
-            if let Some(ud) = val.as_userdata() {
-                reachable_ud.insert(ud.as_ptr());
+        // Scan ONLY slots that are known to contain live local variables
+        // Use the proto's locvars to identify which slots are local variables
+        // at the current PC, avoiding stale temporaries
+        let frames = self.call_stack.frames();
+        for frame in frames.iter() {
+            if let Some(closure) = frame.closure {
+                let proto = unsafe { &*(*closure.as_ptr()).proto.as_ptr() };
+                let pc = frame.pc;
+
+                // Check each local variable that's in scope at this PC
+                for locvar in &proto.locvars {
+                    let start = locvar.start_pc as usize;
+                    let end = locvar.end_pc as usize;
+                    if start <= pc && pc <= end {
+                        let slot = frame.base + locvar.slot as usize;
+                        let val = self.stack.get(slot);
+                        if let Some(ud) = val.as_userdata() {
+                            reachable_ud.insert(ud.as_ptr());
+                        }
+                    }
+                }
+
+                // Also scan parameters (always live)
+                for i in 0..(proto.num_params as usize) {
+                    let slot = frame.base + i;
+                    let val = self.stack.get(slot);
+                    if let Some(ud) = val.as_userdata() {
+                        reachable_ud.insert(ud.as_ptr());
+                    }
+                }
+            } else {
+                // Native frame - scan from base to frame's top
+                let start = frame.base;
+                let end = frame.top;
+                for i in start..end {
+                    let val = self.stack.get(i);
+                    if let Some(ud) = val.as_userdata() {
+                        reachable_ud.insert(ud.as_ptr());
+                    }
+                }
             }
         }
+
+        // Also scan any values below the first frame (for globals setup, etc.)
+        if let Some(first_frame) = frames.first() {
+            for i in 0..first_frame.base {
+                let val = self.stack.get(i);
+                if let Some(ud) = val.as_userdata() {
+                    reachable_ud.insert(ud.as_ptr());
+                }
+            }
+        }
+
         self.mark_table_userdata(self.globals, &mut reachable_ud);
         self.mark_table_userdata(self.registry, &mut reachable_ud);
 

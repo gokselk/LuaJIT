@@ -27,6 +27,11 @@ use crate::vm::State;
 
 /// Register all standard libraries
 pub fn register_all(state: &mut State) {
+    // Disable GC during library setup to prevent tables from being collected
+    // before they are rooted in globals/registry
+    let gc_was_enabled = state.gc.is_running();
+    state.gc.stop();
+
     register_base(state);
     register_math(state);
     register_string(state);
@@ -39,6 +44,11 @@ pub fn register_all(state: &mut State) {
 
     // Populate package.loaded with built-in modules
     populate_package_loaded(state);
+
+    // Re-enable GC if it was enabled before
+    if gc_was_enabled {
+        state.gc.restart();
+    }
 }
 
 /// Populate package.loaded with references to standard library modules
