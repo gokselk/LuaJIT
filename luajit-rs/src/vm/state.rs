@@ -44,6 +44,8 @@ pub struct State {
     pub open_upvalues: Option<GcRef<Upvalue>>,
     /// Whether the current call is a method call (for error formatting)
     pub is_method_call: bool,
+    /// Cached error location (captured before stack unwinding)
+    pub error_location: Option<String>,
 }
 
 /// Thread/coroutine status
@@ -84,6 +86,7 @@ impl State {
             status: ThreadStatus::Ok,
             open_upvalues: None,
             is_method_call: false,
+            error_location: None,
         };
 
         // Initialize standard globals
@@ -497,8 +500,15 @@ impl State {
     }
 
     /// Format an error with location info
-    pub fn format_error(&self, error: &LuaError) -> String {
-        let location = self.get_error_location();
+    pub fn format_error(&mut self, error: &LuaError) -> String {
+        // Use cached error location if available (captured before stack unwinding)
+        let location = if let Some(ref loc) = self.error_location {
+            loc.clone()
+        } else {
+            self.get_error_location()
+        };
+        // Clear the cached location after use
+        self.error_location = None;
         format!("{}{}", location, error)
     }
 }

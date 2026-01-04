@@ -111,6 +111,12 @@ fn register_preload_modules(state: &mut State, preload: GcRef<Table>) {
     // table.clear - LuaJIT extension
     add_preload(state, preload, "table.clear", table_clear_loader);
 
+    // table.clone - LuaJIT extension for shallow table cloning
+    add_preload(state, preload, "table.clone", table_clone_loader);
+
+    // table.nkeys - LuaJIT extension for counting table keys
+    add_preload(state, preload, "table.nkeys", table_nkeys_loader);
+
     // bit - bit operations (LuaJIT)
     add_preload(state, preload, "bit", bit_loader);
 
@@ -296,6 +302,98 @@ fn table_clear_impl(state: &mut State) -> LuaResult<usize> {
         unsafe { (*t.as_ptr()).clear(); }
     }
     Ok(0)
+}
+
+/// table.clone(t) -> shallow copy of table
+fn table_clone_loader(state: &mut State) -> LuaResult<usize> {
+    state.register_function("__table_clone_impl", table_clone_impl);
+    let key = state.intern_string("__table_clone_impl");
+    let func = unsafe {
+        let globals = &*state.globals.as_ptr();
+        globals.get(&key)
+    };
+    state.push(func)?;
+    Ok(1)
+}
+
+fn table_clone_impl(state: &mut State) -> LuaResult<usize> {
+    let table = state.get_value(1);
+    if let Some(t) = table.as_table() {
+        let src = unsafe { &*t.as_ptr() };
+        // Create new table with same capacity
+        let clone = state.create_table(src.array_len(), src.hash_len());
+        let dst = unsafe { &mut *clone.as_ptr() };
+
+        // Copy array part
+        for i in 1..=src.array_len() {
+            let val = src.get_array(i);
+            if !val.is_nil() {
+                dst.set_array(i, val);
+            }
+        }
+
+        // Copy hash part
+        for (k, v) in src.iter() {
+            dst.set(k, v);
+        }
+
+        // Copy metatable if any
+        if let Some(mt) = src.get_metatable() {
+            dst.set_metatable(Some(mt));
+        }
+
+        state.push(Value::table(clone))?;
+        Ok(1)
+    } else {
+        Err(LuaError::ArgumentError {
+            func: "clone".to_string(),
+            arg: 1,
+            msg: "table expected".to_string(),
+        })
+    }
+}
+
+/// table.nkeys(t) -> number of keys in table
+fn table_nkeys_loader(state: &mut State) -> LuaResult<usize> {
+    state.register_function("__table_nkeys_impl", table_nkeys_impl);
+    let key = state.intern_string("__table_nkeys_impl");
+    let func = unsafe {
+        let globals = &*state.globals.as_ptr();
+        globals.get(&key)
+    };
+    state.push(func)?;
+    Ok(1)
+}
+
+fn table_nkeys_impl(state: &mut State) -> LuaResult<usize> {
+    let table = state.get_value(1);
+    if let Some(t) = table.as_table() {
+        let src = unsafe { &*t.as_ptr() };
+        let mut count = 0usize;
+
+        // Count array part
+        for i in 1..=src.array_len() {
+            if !src.get_array(i).is_nil() {
+                count += 1;
+            }
+        }
+
+        // Count hash part
+        for (_, v) in src.iter() {
+            if !v.is_nil() {
+                count += 1;
+            }
+        }
+
+        state.push(Value::number(count as f64))?;
+        Ok(1)
+    } else {
+        Err(LuaError::ArgumentError {
+            func: "nkeys".to_string(),
+            arg: 1,
+            msg: "table expected".to_string(),
+        })
+    }
 }
 
 /// Register the bit library as a global

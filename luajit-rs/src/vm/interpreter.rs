@@ -110,10 +110,22 @@ impl<'a> Interpreter<'a> {
         // Set up stack
         self.state.stack.set_base(base);
         self.state.stack.set_top(frame.top);
-        self.state.call_stack.push(frame);
+        if let Err(e) = self.state.call_stack.push(frame) {
+            // Capture error location before unwinding - use the caller's frame
+            self.state.error_location = Some(self.state.get_error_location());
+            // Restore stack state before returning error
+            self.state.stack.set_base(saved_base);
+            self.state.stack.set_top(saved_top);
+            return Err(e);
+        }
 
         // Execute
         let result = self.execute();
+
+        // Capture error location before popping the frame
+        if result.is_err() && self.state.error_location.is_none() {
+            self.state.error_location = Some(self.state.get_error_location());
+        }
 
         // Clean up - restore caller's stack state
         self.state.call_stack.pop();
@@ -159,7 +171,7 @@ impl<'a> Interpreter<'a> {
 
         // Create native frame
         let frame = CallFrame::new_native(base, func_idx, nresults);
-        self.state.call_stack.push(frame);
+        self.state.call_stack.push(frame)?;
 
         // Call the function
         let result = (native.func)(self.state);

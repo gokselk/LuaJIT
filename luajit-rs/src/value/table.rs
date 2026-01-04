@@ -446,6 +446,27 @@ impl Table {
     pub fn reserve_hash(&self, additional: usize) {
         self.hash.borrow_mut().reserve(additional);
     }
+
+    /// Get array part length
+    pub fn array_len(&self) -> usize {
+        self.array.borrow().len()
+    }
+
+    /// Get hash part length
+    pub fn hash_len(&self) -> usize {
+        self.hash.borrow().len()
+    }
+
+    /// Iterate over all key-value pairs in the hash part
+    pub fn iter(&self) -> impl Iterator<Item = (Value, Value)> + '_ {
+        let hash = self.hash.borrow();
+        // We need to collect the items since we can't return a borrow
+        let items: Vec<_> = hash.iter()
+            .map(|(k, v)| (self.key_to_value(k), *v))
+            .collect();
+        drop(hash);
+        items.into_iter()
+    }
 }
 
 impl Value {

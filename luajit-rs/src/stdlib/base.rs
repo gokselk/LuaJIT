@@ -161,7 +161,8 @@ fn lua_pcall(state: &mut State) -> LuaResult<usize> {
             // Error - return false, error message with location
             state.set_top(0);
             state.push(Value::boolean(false))?;
-            let err_msg = state.intern_string(&state.format_error(&e));
+            let formatted = state.format_error(&e);
+            let err_msg = state.intern_string(&formatted);
             state.push(err_msg)?;
             Ok(2)
         }
@@ -200,7 +201,8 @@ fn lua_xpcall(state: &mut State) -> LuaResult<usize> {
         Err(e) => {
             // Call the error handler with the error message (with location)
             state.set_top(0);
-            let err_msg = state.intern_string(&state.format_error(&e));
+            let formatted = state.format_error(&e);
+            let err_msg = state.intern_string(&formatted);
 
             if err_handler.is_function() {
                 state.push(err_handler)?;

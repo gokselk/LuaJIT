@@ -639,6 +639,12 @@ impl<'a> PatternMatcher<'a> {
     /// Match pattern starting at given positions
     fn match_here(&mut self, mut p_pos: usize, mut s_pos: usize) -> Option<usize> {
         while p_pos < self.pattern.len() {
+            // Check for end anchor $
+            if self.pattern[p_pos] == b'$' && p_pos + 1 == self.pattern.len() {
+                // $ at the end means must be at end of subject
+                return if s_pos == self.subject.len() { Some(s_pos) } else { None };
+            }
+
             // Check for capture start
             if self.pattern[p_pos] == b'(' {
                 let capture_start = s_pos;
@@ -932,8 +938,8 @@ fn string_gmatch(state: &mut State) -> LuaResult<usize> {
     let s = state.get_value(1);
     let pattern = state.get_value(2);
 
-    let s_str = if let Some(str_ref) = s.as_string() {
-        unsafe { (*str_ref.as_ptr()).as_str().unwrap_or("").to_string() }
+    let s_bytes = if let Some(str_ref) = s.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_bytes().to_vec() }
     } else {
         return Err(LuaError::ArgumentError {
             func: "string.gmatch".to_string(),
@@ -942,8 +948,8 @@ fn string_gmatch(state: &mut State) -> LuaResult<usize> {
         });
     };
 
-    let _pat_str = if let Some(str_ref) = pattern.as_string() {
-        unsafe { (*str_ref.as_ptr()).as_str().unwrap_or("").to_string() }
+    let pat_bytes = if let Some(str_ref) = pattern.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_bytes().to_vec() }
     } else {
         return Err(LuaError::ArgumentError {
             func: "string.gmatch".to_string(),
@@ -952,12 +958,97 @@ fn string_gmatch(state: &mut State) -> LuaResult<usize> {
         });
     };
 
-    // For now, return an iterator that returns nil (ends immediately)
-    // This is a stub that needs proper implementation with closures
-    let native = crate::value::NativeFunction::new(|_state| Ok(0));
+    // Create a table to store the iterator state (s, pattern, position)
+    let iter_state = state.create_table(0, 4);
+
+    // Store s
+    let s_key = state.intern_string("s");
+    let s_val = state.intern_bytes(&s_bytes);
+    unsafe { (*iter_state.as_ptr()).set(s_key, s_val); }
+
+    // Store pattern
+    let pat_key = state.intern_string("p");
+    let pat_val = state.intern_bytes(&pat_bytes);
+    unsafe { (*iter_state.as_ptr()).set(pat_key, pat_val); }
+
+    // Store position (1-indexed)
+    let pos_key = state.intern_string("i");
+    unsafe { (*iter_state.as_ptr()).set(pos_key, Value::integer(1)); }
+
+    // Create the iterator function
+    let native = crate::value::NativeFunction::new(gmatch_iter);
     let func_ref = state.gc.alloc(crate::value::Function::Native(native));
+
+    // Return iterator function, state table, nil (initial control variable)
     state.push(Value::function(func_ref))?;
-    Ok(1)
+    state.push(Value::table(iter_state))?;
+    state.push(Value::nil())?;
+    Ok(3)
+}
+
+/// Iterator function for string.gmatch
+fn gmatch_iter(state: &mut State) -> LuaResult<usize> {
+    // Get the state table (first argument)
+    let iter_state = state.get_value(1);
+
+    let state_tbl = iter_state.as_table().ok_or_else(|| {
+        LuaError::RuntimeError("gmatch: invalid iterator state".to_string())
+    })?;
+
+    let state_tbl_ptr = unsafe { &mut *state_tbl.as_ptr() };
+
+    // Get s, pattern, position from state
+    let s_key = state.intern_string("s");
+    let s_val = state_tbl_ptr.get(&s_key);
+    let s_bytes = if let Some(str_ref) = s_val.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_bytes().to_vec() }
+    } else {
+        return Ok(0); // End of iteration
+    };
+
+    let pat_key = state.intern_string("p");
+    let pat_val = state_tbl_ptr.get(&pat_key);
+    let pat_bytes = if let Some(str_ref) = pat_val.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_bytes().to_vec() }
+    } else {
+        return Ok(0);
+    };
+
+    let pos_key = state.intern_string("i");
+    let pos_val = state_tbl_ptr.get(&pos_key);
+    let pos = pos_val.as_integer().unwrap_or(1) as usize;
+
+    if pos > s_bytes.len() {
+        return Ok(0); // End of iteration
+    }
+
+    let start_idx = if pos >= 1 { pos - 1 } else { 0 };
+
+    let mut matcher = PatternMatcher::new(&pat_bytes, &s_bytes);
+
+    if let Some((match_start, match_end)) = matcher.find_match(start_idx) {
+        // Update position for next iteration (skip at least 1 character to avoid infinite loops)
+        let new_pos = (match_end.max(match_start + 1)) + 1;
+        state_tbl_ptr.set(pos_key, Value::integer(new_pos as i32));
+
+        if matcher.captures.is_empty() {
+            // No captures, return the whole match
+            let matched = &s_bytes[match_start..match_end];
+            let val = state.intern_string(std::str::from_utf8(matched).unwrap_or(""));
+            state.push(val)?;
+            Ok(1)
+        } else {
+            // Return captures
+            for (cap_start, cap_end) in &matcher.captures {
+                let captured = &s_bytes[*cap_start..*cap_end];
+                let val = state.intern_string(std::str::from_utf8(captured).unwrap_or(""));
+                state.push(val)?;
+            }
+            Ok(matcher.captures.len())
+        }
+    } else {
+        Ok(0) // No more matches
+    }
 }
 
 /// string.dump(function [, strip]) -> binary string

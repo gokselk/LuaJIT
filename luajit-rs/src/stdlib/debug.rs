@@ -124,15 +124,34 @@ fn debug_traceback(state: &mut State) -> LuaResult<usize> {
     let level = state.to_integer(2).unwrap_or(1) as usize;
 
     // Build a real stack traceback
+    // Get stack frames from call stack
+    let frames = state.call_stack.frames();
+    let num_frames = frames.len();
+
+    // First, count how many Lua frames we can show
+    let mut lua_frame_count = 0;
+    for i in (0..num_frames).rev() {
+        if i < level {
+            continue;
+        }
+        let frame = &frames[i];
+        if frame.closure.is_some() {
+            lua_frame_count += 1;
+        }
+    }
+
+    // If no Lua frames to show, just return the message without traceback
+    if lua_frame_count == 0 {
+        let result_val = state.intern_string(&msg);
+        state.push(result_val)?;
+        return Ok(1);
+    }
+
     let mut result = if msg.is_empty() {
         "stack traceback:".to_string()
     } else {
         format!("{}\nstack traceback:", msg)
     };
-
-    // Get stack frames from call stack
-    let frames = state.call_stack.frames();
-    let num_frames = frames.len();
 
     // Skip 'level' frames and show up to 11 entries
     let mut shown = 0;

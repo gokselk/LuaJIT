@@ -314,7 +314,8 @@ impl<'a> Lexer<'a> {
 
             '0'..='9' => self.read_number(c)?,
 
-            c if c.is_alphabetic() || c == '_' => self.read_name(c),
+            // LuaJIT accepts ASCII letters, underscore, and any UTF-8 byte >= 0x80
+            c if c.is_ascii_alphabetic() || c == '_' || !c.is_ascii() => self.read_name(c),
 
             _ => {
                 return Err(LuaError::SyntaxError(format!(
@@ -394,12 +395,13 @@ impl<'a> Lexer<'a> {
     }
 
     /// Read a name/identifier
+    /// LuaJIT accepts ASCII alphanumeric, underscore, and any UTF-8 byte >= 0x80
     fn read_name(&mut self, first: char) -> TokenKind {
         let mut name = String::new();
         name.push(first);
 
         while let Some(c) = self.peek_char() {
-            if c.is_alphanumeric() || c == '_' {
+            if c.is_ascii_alphanumeric() || c == '_' || !c.is_ascii() {
                 name.push(c);
                 self.advance();
             } else {

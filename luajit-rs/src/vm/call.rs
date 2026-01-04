@@ -109,6 +109,9 @@ impl CallFrame {
     }
 }
 
+/// Maximum call stack depth to prevent stack overflow
+const MAX_CALL_DEPTH: usize = 1000;
+
 /// Call stack for the VM
 pub struct CallStack {
     frames: SmallVec<[CallFrame; 16]>,
@@ -121,9 +124,13 @@ impl CallStack {
         }
     }
 
-    /// Push a new frame
-    pub fn push(&mut self, frame: CallFrame) {
+    /// Push a new frame (with stack overflow check)
+    pub fn push(&mut self, frame: CallFrame) -> crate::value::LuaResult<()> {
+        if self.frames.len() >= MAX_CALL_DEPTH {
+            return Err(crate::value::LuaError::StackOverflow);
+        }
         self.frames.push(frame);
+        Ok(())
     }
 
     /// Pop the current frame

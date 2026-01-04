@@ -747,6 +747,9 @@ impl<'a> Compiler<'a> {
             }
         }
 
+        // Track the actual iterator base (where func, state, var are stored)
+        let mut iter_base = base;
+
         // If there's only 1 expression and it's a call, patch it to return 3 values
         // (e.g., pairs(t) returns next, t, nil)
         if num_exprs == 1 {
@@ -758,6 +761,8 @@ impl<'a> Compiler<'a> {
                 self.fs_mut().proto.code[call_pc] = call_instr;
                 // Reserve the additional 2 slots for the extra return values
                 self.fs_mut().free_reg = call_base + 3;
+                // The iterator slots are at call_base, not at original base
+                iter_base = call_base;
                 num_exprs = 3;
             }
         }
@@ -800,7 +805,7 @@ impl<'a> Compiler<'a> {
 
         // Emit UCLO to close upvalues for loop variables before continuing
         let line = self.current_line();
-        self.fs_mut().emit(Instruction::adj(Opcode::UCLO, base + 3, 0), line);
+        self.fs_mut().emit(Instruction::adj(Opcode::UCLO, (iter_base + 3) as u8, 0), line);
 
         // Patch JMP to here (loop test)
         let test_pc = self.fs().current_pc();
@@ -808,14 +813,14 @@ impl<'a> Compiler<'a> {
 
         // Emit ITERC (call iterator)
         self.fs_mut().emit(
-            Instruction::abc(Opcode::ITERC, base + 3, base, names.len() as u8 + 1),
+            Instruction::abc(Opcode::ITERC, (iter_base + 3) as u8, iter_base as u8, names.len() as u8 + 1),
             line,
         );
 
         // Emit ITERL (loop if not nil)
         let pc = self.fs().current_pc();
         let offset = loop_start as i16 - pc as i16 - 1;
-        self.fs_mut().emit(Instruction::adj(Opcode::ITERL, base + 3, offset), line);
+        self.fs_mut().emit(Instruction::adj(Opcode::ITERL, (iter_base + 3) as u8, offset), line);
 
         // Patch breaks
         let target = self.fs().current_pc();
@@ -1942,6 +1947,9 @@ impl<'a> Compiler<'a> {
     fn parse_suffixed_expr(&mut self) -> LuaResult<ExprDesc> {
         let mut expr = self.parse_primary_expr()?;
 
+        // Track the line where the expression/suffix ended for ambiguous syntax detection
+        let mut last_line = self.current_line();
+
         // In Lua, only names and parenthesized expressions can have suffixes.
         // Literals (numbers, strings, nil, true, false, table constructors,
         // function expressions) cannot have suffixes directly.
@@ -1970,6 +1978,7 @@ impl<'a> Compiler<'a> {
                         TokenKind::Name(n) => n,
                         _ => return Err(LuaError::SyntaxError("expected name after '.'".to_string())),
                     };
+                    last_line = self.current_line();
                     let table_reg = self.expr_to_register(expr)?;
                     let key_idx = self.fs_mut().add_string_constant(&name);
                     expr = ExprDesc::Index {
@@ -1985,6 +1994,7 @@ impl<'a> Compiler<'a> {
                     let key_expr = self.parse_expression()?;
                     let key_reg = self.expr_to_register(key_expr)?;
                     self.lexer.expect(TokenKind::RBracket)?;
+                    last_line = self.current_line();
                     expr = ExprDesc::Index {
                         table: table_reg,
                         key: key_reg,
@@ -2007,12 +2017,25 @@ impl<'a> Compiler<'a> {
                         key_is_const: true,
                     };
                     expr = self.parse_method_call_expr(method_expr, table_reg)?;
+                    last_line = self.current_line();
                     can_have_suffix = true;
                 }
                 TokenKind::LParen | TokenKind::LBrace | TokenKind::String(_) => {
+                    // In Lua 5.1, a function call that starts on a different line is
+                    // considered ambiguous syntax (could be new statement or call)
+                    let next_line = self.lexer.peek()?.line;
+                    if next_line != last_line {
+                        // Check if it's a '(' - this is the ambiguous case
+                        if matches!(self.lexer.peek()?.kind, TokenKind::LParen) {
+                            return Err(LuaError::SyntaxError(
+                                "ambiguous syntax (function call x new statement)".to_string()
+                            ));
+                        }
+                    }
                     // Use call_target_hint if set, to place function at the right position
                     let target = self.call_target_hint.take();
                     expr = self.parse_call_expr_with_target(expr, false, target)?;
+                    last_line = self.current_line();
                     can_have_suffix = true;
                 }
                 _ => break,
@@ -2743,6 +2766,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn parse_function_body(&mut self, is_method: bool) -> LuaResult<Proto> {
+        let start_line = self.current_line();
         self.lexer.expect(TokenKind::LParen)?;
 
         // Parse parameters
@@ -2806,6 +2830,7 @@ impl<'a> Compiler<'a> {
         // Parse body
         self.parse_block()?;
         self.lexer.expect(TokenKind::End)?;
+        let end_line = self.current_line();
 
         // Emit return if not present
         let line = self.current_line();
@@ -2818,6 +2843,8 @@ impl<'a> Compiler<'a> {
         let mut fs = self.functions.pop().unwrap();
         fs.proto.num_params = fs.num_params;
         fs.proto.is_vararg = fs.is_vararg;
+        fs.proto.line_defined = start_line as u32;
+        fs.proto.last_line_defined = end_line as u32;
         Ok(fs.proto)
     }
 
