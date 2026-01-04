@@ -1670,7 +1670,27 @@ impl<'a> Compiler<'a> {
     fn parse_suffixed_expr(&mut self) -> LuaResult<ExprDesc> {
         let mut expr = self.parse_primary_expr()?;
 
+        // In Lua, only names and parenthesized expressions can have suffixes.
+        // Literals (numbers, strings, nil, true, false, table constructors,
+        // function expressions) cannot have suffixes directly.
+        // Track whether suffixes are allowed.
+        let mut can_have_suffix = match &expr {
+            ExprDesc::Register(_) |  // Could be name or parenthesized expr result
+            ExprDesc::Global(_) |    // Global variable
+            ExprDesc::Upvalue(_) |   // Upvalue
+            ExprDesc::Index { .. } | // Already indexed
+            ExprDesc::Call(_, _, _) => true,  // Call result
+            // Literals cannot have suffixes
+            ExprDesc::Number(_) | ExprDesc::String(_) | ExprDesc::Nil |
+            ExprDesc::Bool(_) | ExprDesc::Vararg => false,
+            _ => false,
+        };
+
         loop {
+            if !can_have_suffix {
+                break;
+            }
+
             match &self.lexer.peek()?.kind {
                 TokenKind::Dot => {
                     self.lexer.next()?;
@@ -1685,6 +1705,7 @@ impl<'a> Compiler<'a> {
                         key: key_idx as u8,
                         key_is_const: true,
                     };
+                    can_have_suffix = true;
                 }
                 TokenKind::LBracket => {
                     self.lexer.next()?;
@@ -1697,6 +1718,7 @@ impl<'a> Compiler<'a> {
                         key: key_reg,
                         key_is_const: false,
                     };
+                    can_have_suffix = true;
                 }
                 TokenKind::Colon => {
                     self.lexer.next()?;
@@ -1713,9 +1735,11 @@ impl<'a> Compiler<'a> {
                         key_is_const: true,
                     };
                     expr = self.parse_method_call_expr(method_expr, table_reg)?;
+                    can_have_suffix = true;
                 }
                 TokenKind::LParen | TokenKind::LBrace | TokenKind::String(_) => {
                     expr = self.parse_call_expr(expr, false)?;
+                    can_have_suffix = true;
                 }
                 _ => break,
             }
