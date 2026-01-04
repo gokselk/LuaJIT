@@ -368,7 +368,7 @@ impl<'a> Interpreter<'a> {
         Ok(None)
     }
 
-    /// Handle __index metamethod for table access
+    /// Handle __index metamethod for table/userdata access
     /// Returns the value (possibly from metamethod) or nil
     fn table_index(&mut self, table: Value, key: Value, result_slot: usize) -> LuaResult<()> {
         if let Some(t) = table.as_table() {
@@ -379,30 +379,42 @@ impl<'a> Interpreter<'a> {
             }
             // Key not found, try __index
             if let Some(mm) = self.get_metamethod(&table, "__index") {
-                if let Some(idx_table) = mm.as_table() {
-                    // __index is a table, look up in it
-                    let val = unsafe { (*idx_table.as_ptr()).get(&key) };
-                    self.state.stack.set(result_slot, val);
-                } else if mm.as_function().is_some() {
-                    // __index is a function, call it
-                    let call_base = self.state.stack.top();
-                    self.state.stack.set(call_base, mm);
-                    self.state.stack.set(call_base + 1, table);
-                    self.state.stack.set(call_base + 2, key);
-                    self.state.stack.set_top(call_base + 3);
-                    self.call(call_base, 2, 1)?;
-                    let result = self.state.stack.get(call_base);
-                    self.state.stack.set(result_slot, result);
-                } else {
-                    self.state.stack.set(result_slot, Value::nil());
-                }
-                return Ok(());
+                return self.call_index_metamethod(mm, table, key, result_slot);
+            }
+            self.state.stack.set(result_slot, Value::nil());
+            Ok(())
+        } else if table.is_userdata() {
+            // Userdata always needs __index metamethod
+            if let Some(mm) = self.get_metamethod(&table, "__index") {
+                return self.call_index_metamethod(mm, table, key, result_slot);
             }
             self.state.stack.set(result_slot, Value::nil());
             Ok(())
         } else {
             Err(LuaError::IndexError(table.lua_type()))
         }
+    }
+
+    /// Call the __index metamethod
+    fn call_index_metamethod(&mut self, mm: Value, table: Value, key: Value, result_slot: usize) -> LuaResult<()> {
+        if let Some(idx_table) = mm.as_table() {
+            // __index is a table, look up in it
+            let val = unsafe { (*idx_table.as_ptr()).get(&key) };
+            self.state.stack.set(result_slot, val);
+        } else if mm.as_function().is_some() {
+            // __index is a function, call it
+            let call_base = self.state.stack.top();
+            self.state.stack.set(call_base, mm);
+            self.state.stack.set(call_base + 1, table);
+            self.state.stack.set(call_base + 2, key);
+            self.state.stack.set_top(call_base + 3);
+            self.call(call_base, 2, 1)?;
+            let result = self.state.stack.get(call_base);
+            self.state.stack.set(result_slot, result);
+        } else {
+            self.state.stack.set(result_slot, Value::nil());
+        }
+        Ok(())
     }
 
     /// Handle __newindex metamethod for table assignment
@@ -576,14 +588,26 @@ impl<'a> Interpreter<'a> {
                 Opcode::LEN => {
                     let d = instr.d() as usize;
                     let vd = self.state.stack.get(base + d);
-                    let len = if let Some(t) = vd.as_table() {
-                        unsafe { (*t.as_ptr()).len() as f64 }
+
+                    // Check for __len metamethod first (for tables and userdata)
+                    if let Some(mm) = self.get_metamethod(&vd, "__len") {
+                        // Call the __len metamethod
+                        let call_base = self.state.stack.top();
+                        self.state.stack.set(call_base, mm);
+                        self.state.stack.set(call_base + 1, vd);
+                        self.state.stack.set_top(call_base + 2);
+                        self.call(call_base, 1, 1)?;
+                        let result = self.state.stack.get(call_base);
+                        self.state.stack.set(base + a, result);
+                    } else if let Some(t) = vd.as_table() {
+                        let len = unsafe { (*t.as_ptr()).len() as f64 };
+                        self.state.stack.set(base + a, Value::number(len));
                     } else if let Some(s) = vd.as_string() {
-                        unsafe { (*s.as_ptr()).len() as f64 }
+                        let len = unsafe { (*s.as_ptr()).len() as f64 };
+                        self.state.stack.set(base + a, Value::number(len));
                     } else {
                         return Err(LuaError::LengthError(vd.lua_type()));
-                    };
-                    self.state.stack.set(base + a, Value::number(len));
+                    }
                 }
 
                 // Comparison operations
@@ -743,7 +767,7 @@ impl<'a> Interpreter<'a> {
                         frame.get_constant(c)
                     };
 
-                    if table.is_table() {
+                    if table.is_table() || table.is_userdata() {
                         self.table_index(table, key, base + a)?;
                     } else if table.is_string() {
                         // String method access: s.sub -> string.sub

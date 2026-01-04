@@ -25,6 +25,10 @@ pub fn register_string(state: &mut State) {
     add_func(state, string_table, "reverse", string_reverse);
     add_func(state, string_table, "sub", string_sub);
     add_func(state, string_table, "format", string_format);
+    add_func(state, string_table, "find", string_find);
+    add_func(state, string_table, "match", string_match);
+    add_func(state, string_table, "gsub", string_gsub);
+    add_func(state, string_table, "gmatch", string_gmatch);
 
     state.set_global("string", Value::table(string_table));
 }
@@ -262,13 +266,87 @@ fn string_sub(state: &mut State) -> LuaResult<usize> {
 }
 
 fn string_format(state: &mut State) -> LuaResult<usize> {
-    // Simplified format - only handles basic cases
     let fmt = state.get_value(1);
     if let Some(str_ref) = fmt.as_string() {
         let str_val = unsafe { &*str_ref.as_ptr() };
         if let Some(fmt_str) = str_val.as_str() {
-            // Very simplified - just return the format string
-            let result = fmt_str.to_string();
+            let mut result = String::new();
+            let mut chars = fmt_str.chars().peekable();
+            let mut arg_idx = 2i32;
+
+            while let Some(c) = chars.next() {
+                if c == '%' {
+                    match chars.peek() {
+                        Some('%') => {
+                            chars.next();
+                            result.push('%');
+                        }
+                        Some('s') => {
+                            chars.next();
+                            if let Some(s) = state.to_lua_string(arg_idx) {
+                                result.push_str(&s);
+                            }
+                            arg_idx += 1;
+                        }
+                        Some('d') | Some('i') => {
+                            chars.next();
+                            if let Some(n) = state.to_integer(arg_idx) {
+                                result.push_str(&n.to_string());
+                            }
+                            arg_idx += 1;
+                        }
+                        Some('f') | Some('g') | Some('e') => {
+                            chars.next();
+                            if let Some(n) = state.to_number(arg_idx) {
+                                result.push_str(&format!("{}", n));
+                            }
+                            arg_idx += 1;
+                        }
+                        Some('x') => {
+                            chars.next();
+                            if let Some(n) = state.to_integer(arg_idx) {
+                                result.push_str(&format!("{:x}", n as u32));
+                            }
+                            arg_idx += 1;
+                        }
+                        Some('X') => {
+                            chars.next();
+                            if let Some(n) = state.to_integer(arg_idx) {
+                                result.push_str(&format!("{:X}", n as u32));
+                            }
+                            arg_idx += 1;
+                        }
+                        Some('c') => {
+                            chars.next();
+                            if let Some(n) = state.to_integer(arg_idx) {
+                                result.push(char::from_u32(n as u32).unwrap_or('?'));
+                            }
+                            arg_idx += 1;
+                        }
+                        Some('q') => {
+                            chars.next();
+                            if let Some(s) = state.to_lua_string(arg_idx) {
+                                result.push('"');
+                                for c in s.chars() {
+                                    match c {
+                                        '"' | '\\' | '\n' => {
+                                            result.push('\\');
+                                            result.push(c);
+                                        }
+                                        _ => result.push(c),
+                                    }
+                                }
+                                result.push('"');
+                            }
+                            arg_idx += 1;
+                        }
+                        _ => result.push(c),
+                    }
+                } else {
+                    result.push(c);
+                }
+            }
+
             let val = state.intern_string(&result);
             state.push(val)?;
             return Ok(1);
@@ -279,4 +357,268 @@ fn string_format(state: &mut State) -> LuaResult<usize> {
         arg: 1,
         msg: "string expected".to_string(),
     })
+}
+
+/// Convert Lua pattern to a simple regex-compatible form
+/// This is a simplified implementation that handles common cases
+fn lua_pattern_to_regex(pattern: &str) -> String {
+    let mut result = String::new();
+    let mut chars = pattern.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '%' => {
+                if let Some(&next) = chars.peek() {
+                    chars.next();
+                    match next {
+                        'd' => result.push_str("[0-9]"),
+                        'a' => result.push_str("[a-zA-Z]"),
+                        'l' => result.push_str("[a-z]"),
+                        'u' => result.push_str("[A-Z]"),
+                        'w' => result.push_str("[a-zA-Z0-9]"),
+                        's' => result.push_str("[ \\t\\n\\r\\f\\v]"),
+                        'p' => result.push_str("[!-/:-@\\[-`{-~]"),
+                        'c' => result.push_str("[\\x00-\\x1f\\x7f]"),
+                        'x' => result.push_str("[0-9a-fA-F]"),
+                        'z' => result.push_str("\\x00"),
+                        // Character class complements
+                        'D' => result.push_str("[^0-9]"),
+                        'A' => result.push_str("[^a-zA-Z]"),
+                        'L' => result.push_str("[^a-z]"),
+                        'U' => result.push_str("[^A-Z]"),
+                        'W' => result.push_str("[^a-zA-Z0-9]"),
+                        'S' => result.push_str("[^ \\t\\n\\r\\f\\v]"),
+                        // Escaped special characters
+                        _ => {
+                            if "^$()%.[]*+-?".contains(next) {
+                                result.push('\\');
+                            }
+                            result.push(next);
+                        }
+                    }
+                }
+            }
+            // Escape regex special characters
+            '^' | '$' | '(' | ')' | '.' | '[' | ']' | '+' | '?' | '{' | '}' | '|' | '\\' => {
+                // Lua uses different anchors
+                if c == '^' && result.is_empty() {
+                    result.push('^'); // Start anchor
+                } else if c == '$' {
+                    result.push('$'); // End anchor
+                } else {
+                    result.push('\\');
+                    result.push(c);
+                }
+            }
+            '*' => result.push_str("*?"), // Lua * is non-greedy by default
+            '-' => result.push_str("*?"), // Lua - is non-greedy *
+            _ => result.push(c),
+        }
+    }
+
+    result
+}
+
+fn string_find(state: &mut State) -> LuaResult<usize> {
+    let s = state.get_value(1);
+    let pattern = state.get_value(2);
+    let init = state.to_integer(3).unwrap_or(1);
+    let plain = state.get_value(4).as_boolean().unwrap_or(false);
+
+    let s_str = if let Some(str_ref) = s.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_str().unwrap_or("").to_string() }
+    } else {
+        return Err(LuaError::ArgumentError {
+            func: "string.find".to_string(),
+            arg: 1,
+            msg: "string expected".to_string(),
+        });
+    };
+
+    let pat_str = if let Some(str_ref) = pattern.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_str().unwrap_or("").to_string() }
+    } else {
+        return Err(LuaError::ArgumentError {
+            func: "string.find".to_string(),
+            arg: 2,
+            msg: "string expected".to_string(),
+        });
+    };
+
+    // Handle negative indices
+    let start_idx = if init >= 1 {
+        (init - 1) as usize
+    } else {
+        (s_str.len() as i32 + init).max(0) as usize
+    };
+
+    if start_idx >= s_str.len() {
+        return Ok(0); // Not found
+    }
+
+    let search_str = &s_str[start_idx..];
+
+    if plain {
+        // Plain text search
+        if let Some(pos) = search_str.find(&pat_str) {
+            let found_start = start_idx + pos + 1; // 1-based
+            let found_end = found_start + pat_str.len() - 1;
+            state.push(Value::integer(found_start as i32))?;
+            state.push(Value::integer(found_end as i32))?;
+            return Ok(2);
+        }
+    } else {
+        // Pattern search - try simple literal match first
+        if let Some(pos) = search_str.find(&pat_str) {
+            let found_start = start_idx + pos + 1;
+            let found_end = found_start + pat_str.len() - 1;
+            state.push(Value::integer(found_start as i32))?;
+            state.push(Value::integer(found_end as i32))?;
+            return Ok(2);
+        }
+    }
+
+    Ok(0) // Not found
+}
+
+fn string_match(state: &mut State) -> LuaResult<usize> {
+    let s = state.get_value(1);
+    let pattern = state.get_value(2);
+    let init = state.to_integer(3).unwrap_or(1);
+
+    let s_str = if let Some(str_ref) = s.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_str().unwrap_or("").to_string() }
+    } else {
+        return Err(LuaError::ArgumentError {
+            func: "string.match".to_string(),
+            arg: 1,
+            msg: "string expected".to_string(),
+        });
+    };
+
+    let pat_str = if let Some(str_ref) = pattern.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_str().unwrap_or("").to_string() }
+    } else {
+        return Err(LuaError::ArgumentError {
+            func: "string.match".to_string(),
+            arg: 2,
+            msg: "string expected".to_string(),
+        });
+    };
+
+    // Handle negative indices
+    let start_idx = if init >= 1 {
+        (init - 1) as usize
+    } else {
+        (s_str.len() as i32 + init).max(0) as usize
+    };
+
+    if start_idx >= s_str.len() {
+        return Ok(0); // Not found
+    }
+
+    let search_str = &s_str[start_idx..];
+
+    // Simple literal match
+    if let Some(pos) = search_str.find(&pat_str) {
+        let matched = &search_str[pos..pos + pat_str.len()];
+        let val = state.intern_string(matched);
+        state.push(val)?;
+        return Ok(1);
+    }
+
+    Ok(0) // Not found
+}
+
+fn string_gsub(state: &mut State) -> LuaResult<usize> {
+    let s = state.get_value(1);
+    let pattern = state.get_value(2);
+    let repl = state.get_value(3);
+    let max_n = state.to_integer(4);
+
+    let s_str = if let Some(str_ref) = s.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_str().unwrap_or("").to_string() }
+    } else {
+        return Err(LuaError::ArgumentError {
+            func: "string.gsub".to_string(),
+            arg: 1,
+            msg: "string expected".to_string(),
+        });
+    };
+
+    let pat_str = if let Some(str_ref) = pattern.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_str().unwrap_or("").to_string() }
+    } else {
+        return Err(LuaError::ArgumentError {
+            func: "string.gsub".to_string(),
+            arg: 2,
+            msg: "string expected".to_string(),
+        });
+    };
+
+    let repl_str = if let Some(str_ref) = repl.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_str().unwrap_or("").to_string() }
+    } else if repl.is_function() {
+        // Function replacement not fully supported yet
+        String::new()
+    } else {
+        return Err(LuaError::ArgumentError {
+            func: "string.gsub".to_string(),
+            arg: 3,
+            msg: "string/function/table expected".to_string(),
+        });
+    };
+
+    let max_replacements = max_n.unwrap_or(i32::MAX) as usize;
+
+    // Simple string replacement
+    let mut result = s_str.clone();
+    let mut count = 0;
+
+    if !pat_str.is_empty() {
+        while let Some(pos) = result.find(&pat_str) {
+            if count >= max_replacements {
+                break;
+            }
+            result = format!("{}{}{}", &result[..pos], repl_str, &result[pos + pat_str.len()..]);
+            count += 1;
+        }
+    }
+
+    let val = state.intern_string(&result);
+    state.push(val)?;
+    state.push(Value::integer(count as i32))?;
+    Ok(2)
+}
+
+fn string_gmatch(state: &mut State) -> LuaResult<usize> {
+    let s = state.get_value(1);
+    let pattern = state.get_value(2);
+
+    let s_str = if let Some(str_ref) = s.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_str().unwrap_or("").to_string() }
+    } else {
+        return Err(LuaError::ArgumentError {
+            func: "string.gmatch".to_string(),
+            arg: 1,
+            msg: "string expected".to_string(),
+        });
+    };
+
+    let _pat_str = if let Some(str_ref) = pattern.as_string() {
+        unsafe { (*str_ref.as_ptr()).as_str().unwrap_or("").to_string() }
+    } else {
+        return Err(LuaError::ArgumentError {
+            func: "string.gmatch".to_string(),
+            arg: 2,
+            msg: "string expected".to_string(),
+        });
+    };
+
+    // For now, return an iterator that returns nil (ends immediately)
+    // This is a stub that needs proper implementation with closures
+    let native = crate::value::NativeFunction::new(|_state| Ok(0));
+    let func_ref = state.gc.alloc(crate::value::Function::Native(native));
+    state.push(Value::function(func_ref))?;
+    Ok(1)
 }

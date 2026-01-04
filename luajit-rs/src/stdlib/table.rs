@@ -58,14 +58,25 @@ fn table_concat(state: &mut State) -> LuaResult<usize> {
             if idx > i {
                 result.push_str(&sep);
             }
-            let val = table.get_array(idx);
+            // Use get() to check both array and hash parts
+            let val = table.get(&Value::integer(idx as i32));
             if let Some(str_ref) = val.as_string() {
                 let str_val = unsafe { &*str_ref.as_ptr() };
                 if let Some(s) = str_val.as_str() {
                     result.push_str(s);
                 }
             } else if let Some(n) = val.as_number() {
-                result.push_str(&format!("{}", n));
+                // Format number: use integer format if it's a whole number
+                if n.fract() == 0.0 && n.abs() < 1e15 {
+                    result.push_str(&format!("{}", n as i64));
+                } else {
+                    result.push_str(&format!("{}", n));
+                }
+            } else {
+                // nil or non-string/number value - error
+                return Err(LuaError::RuntimeError(
+                    format!("invalid value (nil) at index {} in table for 'concat'", idx)
+                ));
             }
         }
 

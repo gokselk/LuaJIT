@@ -17,6 +17,12 @@ pub fn register_package(state: &mut State) {
     // Add built-in modules to preload
     register_preload_modules(state, preload);
 
+    // Register bit library as a global (LuaJIT compatibility)
+    register_bit_library(state);
+
+    // Register jit library as a global (LuaJIT compatibility)
+    register_jit_library(state);
+
     // Set default path
     let default_path = "./?.lua;./?/init.lua;/usr/local/share/lua/5.1/?.lua";
     let path_val = state.intern_string(default_path);
@@ -252,8 +258,8 @@ fn table_clear_impl(state: &mut State) -> LuaResult<usize> {
     Ok(0)
 }
 
-/// bit library loader
-fn bit_loader(state: &mut State) -> LuaResult<usize> {
+/// Register the bit library as a global
+fn register_bit_library(state: &mut State) {
     let bit = state.create_table(0, 16);
 
     let add_func = |state: &mut State, tbl: GcRef<Table>, name: &str, func: crate::value::NativeFn| {
@@ -276,7 +282,18 @@ fn bit_loader(state: &mut State) -> LuaResult<usize> {
     add_func(state, bit, "bswap", bit_bswap);
     add_func(state, bit, "tohex", bit_tohex);
 
-    state.push(Value::table(bit))?;
+    state.set_global("bit", Value::table(bit));
+}
+
+/// bit library loader (for require compatibility)
+fn bit_loader(state: &mut State) -> LuaResult<usize> {
+    // Return the global bit table
+    let key = state.intern_string("bit");
+    let bit = unsafe {
+        let globals = &*state.globals.as_ptr();
+        globals.get(&key)
+    };
+    state.push(bit)?;
     Ok(1)
 }
 
@@ -379,8 +396,8 @@ fn bit_tohex(state: &mut State) -> LuaResult<usize> {
     Ok(1)
 }
 
-/// jit library loader (stub)
-fn jit_loader(state: &mut State) -> LuaResult<usize> {
+/// Register the jit library as a global
+fn register_jit_library(state: &mut State) {
     let jit = state.create_table(0, 8);
 
     let add_func = |state: &mut State, tbl: GcRef<Table>, name: &str, func: crate::value::NativeFn| {
@@ -411,7 +428,18 @@ fn jit_loader(state: &mut State) -> LuaResult<usize> {
     let arch_val = state.intern_string(std::env::consts::ARCH);
     unsafe { (*jit.as_ptr()).set(arch_key, arch_val); }
 
-    state.push(Value::table(jit))?;
+    state.set_global("jit", Value::table(jit));
+}
+
+/// jit library loader (for require compatibility)
+fn jit_loader(state: &mut State) -> LuaResult<usize> {
+    // Return the global jit table
+    let key = state.intern_string("jit");
+    let jit = unsafe {
+        let globals = &*state.globals.as_ptr();
+        globals.get(&key)
+    };
+    state.push(jit)?;
     Ok(1)
 }
 

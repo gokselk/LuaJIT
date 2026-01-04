@@ -169,12 +169,20 @@ fn lua_pcall(state: &mut State) -> LuaResult<usize> {
 
 /// xpcall(f, err, ...) -> status, result...
 fn lua_xpcall(state: &mut State) -> LuaResult<usize> {
-    // Simplified version - just like pcall but ignores error handler
-    let _err_handler = state.get_value(2);
+    let err_handler = state.get_value(2);
+    let top = state.get_top();
+    let nargs = top - 2; // Number of args to pass to f (excluding f and err)
 
-    // Remove error handler and shift arguments
-    let nargs = state.get_top() - 2;
+    // Stack layout: [f, err, arg1, arg2, ...]
+    // We need to rearrange to: [f, arg1, arg2, ...]
+    // Shift arguments left by 1 to remove the error handler
+    for i in 3..=top as i32 {
+        let val = state.get_value(i);
+        state.set_value(i - 1, val);
+    }
+    state.set_top(top - 1); // Remove the extra slot
 
+    // Now stack is [f, arg1, arg2, ...] with nargs arguments
     match state.call(nargs, -1) {
         Ok(()) => {
             let nresults = state.get_top();
@@ -189,11 +197,35 @@ fn lua_xpcall(state: &mut State) -> LuaResult<usize> {
             Ok(nresults + 1)
         }
         Err(e) => {
+            // Call the error handler with the error message
             state.set_top(0);
-            state.push(Value::boolean(false))?;
             let err_msg = state.intern_string(&e.to_string());
-            state.push(err_msg)?;
-            Ok(2)
+
+            if err_handler.is_function() {
+                state.push(err_handler)?;
+                state.push(err_msg)?;
+                match state.call(1, 1) {
+                    Ok(()) => {
+                        // Get the transformed error message
+                        let transformed = state.get_value(1);
+                        state.set_top(0);
+                        state.push(Value::boolean(false))?;
+                        state.push(transformed)?;
+                        Ok(2)
+                    }
+                    Err(_) => {
+                        // Error in error handler - return original error
+                        state.set_top(0);
+                        state.push(Value::boolean(false))?;
+                        state.push(err_msg)?;
+                        Ok(2)
+                    }
+                }
+            } else {
+                state.push(Value::boolean(false))?;
+                state.push(err_msg)?;
+                Ok(2)
+            }
         }
     }
 }

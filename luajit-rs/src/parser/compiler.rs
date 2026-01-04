@@ -871,16 +871,27 @@ impl<'a> Compiler<'a> {
                 let mut num_exprs = 0u8;
                 let num_names = names.len() as u8;
                 let mut last_call_pc: Option<usize> = None;
+                let mut last_vararg_pc: Option<usize> = None;
 
                 loop {
                     let expr = self.parse_expression()?;
                     let target = first_slot + num_exprs;
 
-                    // Track if last expression is a call and its PC
-                    if let ExprDesc::Call(_, _, pc) = expr {
-                        last_call_pc = Some(pc);
-                    } else {
-                        last_call_pc = None;
+                    // Track if last expression is a call/vararg and its PC
+                    match &expr {
+                        ExprDesc::Call(_, _, pc) => {
+                            last_call_pc = Some(*pc);
+                            last_vararg_pc = None;
+                        }
+                        ExprDesc::Vararg => {
+                            // We'll get the VARG pc after expr_to_reg emits it
+                            last_call_pc = None;
+                            last_vararg_pc = Some(self.fs().current_pc());
+                        }
+                        _ => {
+                            last_call_pc = None;
+                            last_vararg_pc = None;
+                        }
                     }
 
                     self.expr_to_reg(expr, target)?;
@@ -918,6 +929,21 @@ impl<'a> Compiler<'a> {
                         // Update free_reg to account for additional results
                         self.fs_mut().free_reg = first_slot + num_names;
                         num_exprs = num_names; // All slots filled by call
+                    }
+                }
+
+                // If last expression was vararg and we need more values, patch it
+                if let Some(varg_pc) = last_vararg_pc {
+                    if num_exprs < num_names {
+                        let needed = num_names - num_exprs + 1; // +1 because we already counted the first result
+                        let mut varg_instr = self.fs().proto.code[varg_pc];
+                        // B field: needed + 1 (since B=0 means MULTRET, B=2 means 1 result, B=3 means 2 results, etc.)
+                        varg_instr.set_b(needed + 1);
+                        self.fs_mut().proto.code[varg_pc] = varg_instr;
+
+                        // Update free_reg to account for additional results
+                        self.fs_mut().free_reg = first_slot + num_names;
+                        num_exprs = num_names; // All slots filled by vararg
                     }
                 }
 
@@ -1109,23 +1135,37 @@ impl<'a> Compiler<'a> {
         // Save free_reg to restore after assignment (temporaries not needed)
         let saved_free_reg = self.fs().free_reg;
 
-        // Parse values - track where each value ends up and if last is a call
+        // Parse values - track where each value ends up and if last is a call/vararg
         let mut value_regs = Vec::new();
         let mut last_call_info: Option<(u8, usize)> = None; // (base_reg, call_pc)
+        let mut last_vararg_info: Option<(u8, usize)> = None; // (base_reg, varg_pc)
 
         loop {
             let expr = self.parse_expression()?;
-            // Track if this expression is a call
-            if let ExprDesc::Call(base, _, pc) = &expr {
-                last_call_info = Some((*base, *pc));
-                // For calls, don't move the result - keep it at call_base
-                // This is important for multi-return handling
-                value_regs.push(*base);
-                self.fs_mut().free_reg = *base + 1;
-            } else {
-                last_call_info = None;
-                let reg = self.expr_to_next_reg(expr)?;
-                value_regs.push(reg);
+            // Track if this expression is a call or vararg
+            match &expr {
+                ExprDesc::Call(base, _, pc) => {
+                    last_call_info = Some((*base, *pc));
+                    last_vararg_info = None;
+                    // For calls, don't move the result - keep it at call_base
+                    // This is important for multi-return handling
+                    value_regs.push(*base);
+                    self.fs_mut().free_reg = *base + 1;
+                }
+                ExprDesc::Vararg => {
+                    last_call_info = None;
+                    let varg_base = self.fs().free_reg;
+                    let varg_pc = self.fs().current_pc();
+                    last_vararg_info = Some((varg_base, varg_pc));
+                    let reg = self.expr_to_next_reg(expr)?;
+                    value_regs.push(reg);
+                }
+                _ => {
+                    last_call_info = None;
+                    last_vararg_info = None;
+                    let reg = self.expr_to_next_reg(expr)?;
+                    value_regs.push(reg);
+                }
             }
             if !self.lexer.match_token(&TokenKind::Comma)? {
                 break;
@@ -1149,6 +1189,17 @@ impl<'a> Compiler<'a> {
                     value_regs.push(call_base + i as u8);
                 }
                 self.fs_mut().free_reg = call_base + extra_needed as u8;
+            } else if let Some((varg_base, varg_pc)) = last_vararg_info {
+                let extra_needed = num_targets - num_values + 1;
+                // Patch VARG to return more results (B = nresults + 1)
+                let mut varg_instr = self.fs().proto.code[varg_pc];
+                varg_instr.set_b((extra_needed + 1) as u8);
+                self.fs_mut().proto.code[varg_pc] = varg_instr;
+                // Add the additional result registers to value_regs
+                for i in 1..extra_needed {
+                    value_regs.push(varg_base + i as u8);
+                }
+                self.fs_mut().free_reg = varg_base + extra_needed as u8;
             }
         }
 
