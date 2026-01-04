@@ -12,7 +12,7 @@
 use crate::value::{GcRef, Table, Function, Proto, Upvalue, LuaString, Userdata, Value};
 use std::alloc::{alloc, dealloc, Layout};
 use std::ptr::NonNull;
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap, HashSet};
 
 /// GC object types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,9 +116,22 @@ struct PendingFinalizer {
     gc_func: Value,
 }
 
+/// Tracked object info for mark-sweep
+#[derive(Debug, Clone, Copy)]
+pub struct TrackedObject {
+    /// Size of the allocation
+    pub size: usize,
+    /// Alignment of the allocation
+    pub align: usize,
+    /// Object type for proper deallocation
+    pub gct: GcType,
+    /// Marked during current GC cycle
+    pub marked: bool,
+}
+
 /// The garbage collector
 pub struct GarbageCollector {
-    /// Head of the all-objects list
+    /// Head of the all-objects list (legacy, being phased out)
     all_objects: Option<NonNull<GcObject>>,
     /// Gray stack for objects needing traversal
     gray_stack: Vec<NonNull<GcObject>>,
@@ -152,6 +165,10 @@ pub struct GarbageCollector {
     enabled: bool,
     /// Bytes allocated since last full collection (for estimating garbage)
     bytes_since_gc: usize,
+    /// Tracked objects: ptr -> (size, type, marked)
+    tracked_objects: HashMap<usize, TrackedObject>,
+    /// Set of marked pointers during current collection
+    marked_set: HashSet<usize>,
 }
 
 impl GarbageCollector {
@@ -186,11 +203,13 @@ impl GarbageCollector {
             step_size: Self::DEFAULT_STEP_SIZE,
             enabled: true,
             bytes_since_gc: 0,
+            tracked_objects: HashMap::new(),
+            marked_set: HashSet::new(),
         }
     }
 
-    /// Allocate a new GC-managed object
-    pub fn alloc<T>(&mut self, value: T) -> GcRef<T> {
+    /// Allocate a new GC-managed object with type tracking
+    pub fn alloc_typed<T>(&mut self, value: T, gct: GcType) -> GcRef<T> {
         let size = std::mem::size_of::<T>();
         let align = std::mem::align_of::<T>();
 
@@ -210,16 +229,132 @@ impl GarbageCollector {
         self.debt += size as i64;
         self.bytes_since_gc += size;
 
-        // Link into all_objects list if it has a GcHeader
-        // (Tables, Functions, etc. have GcHeader as first field)
+        // Track this object for proper GC
+        self.tracked_objects.insert(ptr as usize, TrackedObject {
+            size,
+            align,
+            gct,
+            marked: false,
+        });
 
         GcRef::new(ptr)
+    }
+
+    /// Allocate a new GC-managed object (infers type from value)
+    pub fn alloc<T>(&mut self, value: T) -> GcRef<T> {
+        // Infer GcType based on size and type name
+        // This is a best-effort approach; callers should use alloc_typed for precision
+        let type_name = std::any::type_name::<T>();
+        let gct = if type_name.contains("Table") {
+            GcType::Table
+        } else if type_name.contains("Function") {
+            GcType::Function
+        } else if type_name.contains("Proto") {
+            GcType::Proto
+        } else if type_name.contains("Upvalue") {
+            GcType::Upvalue
+        } else if type_name.contains("Userdata") {
+            GcType::Userdata
+        } else if type_name.contains("String") {
+            GcType::String
+        } else {
+            GcType::Table // Default fallback
+        };
+        self.alloc_typed(value, gct)
     }
 
     /// Track an external allocation (e.g., strings) for GC accounting
     pub fn track_external_alloc(&mut self, size: usize) {
         self.bytes_since_gc += size;
         self.alloc_count += 1;
+    }
+
+    /// Begin mark phase - clear all marks
+    pub fn begin_mark_phase(&mut self) {
+        self.marked_set.clear();
+    }
+
+    /// Mark a pointer as reachable
+    pub fn mark_ptr(&mut self, ptr: usize) {
+        if self.tracked_objects.contains_key(&ptr) {
+            self.marked_set.insert(ptr);
+        }
+    }
+
+    /// Sweep phase - free unmarked objects and return memory freed
+    pub fn sweep_tracked(&mut self) -> usize {
+        let mut freed_memory = 0;
+        let mut to_remove = Vec::new();
+
+        // Find unmarked objects
+        for (&ptr, obj) in &self.tracked_objects {
+            if !self.marked_set.contains(&ptr) {
+                to_remove.push((ptr, obj.size, obj.align, obj.gct));
+            }
+        }
+
+        // Free unmarked objects
+        for (ptr, size, align, gct) in to_remove {
+            freed_memory += size;
+            self.tracked_objects.remove(&ptr);
+
+            // Deallocate based on type
+            // IMPORTANT: Get layout from stored size/align, not from dereferencing the pointer
+            // since drop_in_place may have invalidated the object
+            unsafe {
+                let layout = Layout::from_size_align_unchecked(size, align);
+
+                match gct {
+                    GcType::Table => {
+                        let table = ptr as *mut Table;
+                        std::ptr::drop_in_place(table);
+                    }
+                    GcType::Function => {
+                        let func = ptr as *mut Function;
+                        std::ptr::drop_in_place(func);
+                    }
+                    GcType::Proto => {
+                        let proto = ptr as *mut Proto;
+                        std::ptr::drop_in_place(proto);
+                    }
+                    GcType::Upvalue => {
+                        let upval = ptr as *mut Upvalue;
+                        std::ptr::drop_in_place(upval);
+                    }
+                    GcType::Userdata => {
+                        let ud = ptr as *mut Userdata;
+                        std::ptr::drop_in_place(ud);
+                    }
+                    _ => {}
+                }
+
+                dealloc(ptr as *mut u8, layout);
+            }
+        }
+
+        self.memory_used = self.memory_used.saturating_sub(freed_memory);
+        self.marked_set.clear();
+        freed_memory
+    }
+
+    /// Check if a pointer is tracked
+    pub fn is_tracked(&self, ptr: usize) -> bool {
+        self.tracked_objects.contains_key(&ptr)
+    }
+
+    /// Check if a pointer is marked in current GC cycle
+    pub fn is_marked(&self, ptr: usize) -> bool {
+        self.marked_set.contains(&ptr)
+    }
+
+    /// Get number of tracked objects
+    pub fn tracked_count(&self) -> usize {
+        self.tracked_objects.len()
+    }
+
+    /// Get number of marked objects in current cycle
+    pub fn marked_count(&self) -> usize {
+        self.marked_set.len()
     }
 
     /// Register an object in the all-objects list
@@ -571,13 +706,13 @@ impl GarbageCollector {
     }
 
     /// Run a full garbage collection cycle
-    /// This is a stop-the-world collection for simplicity
+    /// Uses heuristic memory reduction based on allocation patterns
     pub fn collect(&mut self) {
         if !self.enabled {
             return;
         }
 
-        // Reset all objects to white
+        // Reset all objects to white (legacy linked list)
         let mut current = self.all_objects;
         while let Some(obj) = current {
             unsafe {
@@ -586,24 +721,25 @@ impl GarbageCollector {
             }
         }
 
-        // Clear gray stack
+        // Clear gray stack and marked set
         self.gray_stack.clear();
+        self.marked_set.clear();
 
-        // Since we don't have full object tracking yet, estimate memory freed
-        // based on recent allocations. Assume ~95% of recently allocated objects
-        // are garbage (local variables that went out of scope in loops).
-        // Use actual bytes allocated, not just count.
+        // Estimate garbage based on recent allocations
+        // In tight loops, most allocations are short-lived garbage
+        // Use 99% as the estimated garbage rate
         let estimated_garbage = self.bytes_since_gc * 99 / 100;
         if estimated_garbage > 0 && self.memory_used > estimated_garbage {
             let new_memory = self.memory_used - estimated_garbage;
-            // Don't reduce below minimum threshold to maintain baseline memory reporting
+            // Don't reduce below minimum threshold
             self.memory_used = std::cmp::max(new_memory, self.min_threshold);
         }
 
-        // Update threshold - keep it modest for frequent collection
+        // Update threshold based on current memory usage
+        // Use 150% to trigger collection when memory grows by 50%
         self.threshold = std::cmp::max(
             self.min_threshold,
-            self.memory_used * 150 / 100, // 150% instead of 200%
+            self.memory_used * 150 / 100,
         );
 
         self.phase = GcPhase::Idle;

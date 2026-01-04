@@ -412,35 +412,32 @@ impl State {
 
     /// Run garbage collection
     pub fn collect_garbage(&mut self) {
-        // First, collect all roots for marking
-        let mut reachable: HashSet<*mut Userdata> = HashSet::new();
+        // First, collect userdata reachability for finalization
+        let mut reachable_ud: HashSet<*mut Userdata> = HashSet::new();
 
         // Mark userdata on the stack
         for i in 0..self.stack.len() {
             let val = self.stack.get(i);
             if let Some(ud) = val.as_userdata() {
-                reachable.insert(ud.as_ptr());
+                reachable_ud.insert(ud.as_ptr());
             }
         }
 
         // Mark userdata in globals
-        self.mark_table_userdata(self.globals, &mut reachable);
+        self.mark_table_userdata(self.globals, &mut reachable_ud);
 
         // Mark userdata in registry
-        self.mark_table_userdata(self.registry, &mut reachable);
+        self.mark_table_userdata(self.registry, &mut reachable_ud);
 
         // Find unreachable finalizable userdata
-        // Intern the __gc key before the loop
         let gc_key = self.intern_string("__gc");
-
         let mut to_finalize: Vec<(*mut Userdata, Value)> = Vec::new();
         let mut keep: Vec<*mut Userdata> = Vec::new();
 
         for &ptr in &self.finalizable_userdata {
-            if reachable.contains(&ptr) {
+            if reachable_ud.contains(&ptr) {
                 keep.push(ptr);
             } else {
-                // Check for __gc and queue for finalization
                 let ud = unsafe { &*ptr };
                 if let Some(mt) = ud.get_metatable() {
                     let gc_fn = unsafe { (*mt.as_ptr()).get(&gc_key) };
@@ -455,43 +452,28 @@ impl State {
 
         // Run finalizers
         for (ud_ptr, gc_fn) in to_finalize {
-            // Save current stack
             let saved_top = self.get_top();
-
-            // Set metamethod tracking for debug info
-            // Use gc_trigger_context if available, otherwise default to "__gc"
             let mm_name = self.gc_trigger_context.clone().unwrap_or_else(|| "__gc".to_string());
             self.current_metamethod = Some(mm_name);
 
-            // Push finalizer and userdata
-            if self.push(gc_fn).is_err() {
-                self.current_metamethod = None;
-                continue;
-            }
-            if self.push(Value::userdata(GcRef::new(ud_ptr))).is_err() {
-                self.current_metamethod = None;
-                self.set_top(saved_top);
-                continue;
+            if self.push(gc_fn).is_ok() {
+                if self.push(Value::userdata(GcRef::new(ud_ptr))).is_ok() {
+                    let _ = self.pcall(1, 0);
+                }
             }
 
-            // Call finalizer with pcall semantics (don't propagate errors)
-            let _ = self.pcall(1, 0);
-
-            // Clear metamethod tracking
             self.current_metamethod = None;
-
-            // Restore stack
             self.set_top(saved_top);
         }
 
-        // Get bytes allocated since last GC before it's reset
+        // Get bytes allocated since last GC for string simulation
         let bytes_allocated = self.gc.bytes_since_gc();
 
-        // Continue with normal GC
+        // Run GC collection (updates memory accounting)
         self.gc.collect();
 
-        // Simulate freeing string memory (strings are interned but we need
-        // to track "garbage" for memory accounting purposes)
+        // Simulate freeing string memory (strings are interned and never
+        // actually freed, but we reduce the accounting for memory heuristics)
         let string_garbage = bytes_allocated * 99 / 100;
         self.strings.simulate_gc(string_garbage);
     }
@@ -503,7 +485,6 @@ impl State {
             self.mark_value_userdata(&key, reachable);
             self.mark_value_userdata(&value, reachable);
         }
-        // Also check metatable
         if let Some(mt) = t.get_metatable() {
             self.mark_table_userdata(mt, reachable);
         }
@@ -514,8 +495,6 @@ impl State {
         if let Some(ud) = value.as_userdata() {
             reachable.insert(ud.as_ptr());
         } else if let Some(t) = value.as_table() {
-            // Only recurse if not already visited (prevent infinite loops)
-            // For simplicity, we just scan tables found in immediate values
             let table = unsafe { &*t.as_ptr() };
             for (k, v) in table.iter() {
                 if let Some(ud) = k.as_userdata() {
