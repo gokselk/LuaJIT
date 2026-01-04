@@ -2280,7 +2280,7 @@ impl<'a> Compiler<'a> {
             num_args + 1 // Normal: B = fixed args + 1
         };
 
-        // Emit CALL
+        // Emit CALL for method call
         let call_pc = self.fs().current_pc();
         self.fs_mut().emit(
             Instruction::abc(Opcode::CALL, base, b_field, 2),

@@ -931,8 +931,39 @@ impl<'a> Interpreter<'a> {
                         b - 1
                     };
 
+                    // Detect method call pattern: look for MOV copying self in the instructions
+                    // before CALL. Pattern: TGETS/TGETV; MOV(a+1, self); [args]; CALL(a, ...)
+                    let is_method = if nargs >= 1 {
+                        let frame = self.state.call_stack.current().unwrap();
+                        let pc = frame.pc;
+                        if let Some(closure) = frame.closure {
+                            let proto = unsafe { &*(*closure.as_ptr()).proto.as_ptr() };
+                            // Look back through previous instructions for the MOV pattern
+                            // The MOV for self should be within the last few instructions
+                            let search_limit = (pc.saturating_sub(1)).min(10);
+                            let mut found = false;
+                            for i in 1..=search_limit {
+                                if pc < i + 1 { break; }
+                                let check_instr = proto.code[pc - 1 - i];
+                                if check_instr.opcode() == Opcode::MOV &&
+                                   check_instr.a() == (a + 1) as u8 {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            found
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    self.state.is_method_call = is_method;
+
                     let nresults = c - 1;
-                    self.call(base + a, nargs, nresults)?;
+                    let result = self.call(base + a, nargs, nresults);
+                    self.state.is_method_call = false;
+                    result?;
                 }
 
                 Opcode::CALLT => {

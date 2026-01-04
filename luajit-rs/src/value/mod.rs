@@ -104,6 +104,9 @@ pub enum LuaError {
 
     #[error("bad argument #{arg} to '{func}' ({msg})")]
     ArgumentError { func: String, arg: usize, msg: String },
+
+    #[error("calling '{func}' on bad self ({msg})")]
+    SelfError { func: String, msg: String },
 }
 
 /// A garbage-collected reference to a Lua object

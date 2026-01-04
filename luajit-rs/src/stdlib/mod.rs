@@ -36,4 +36,37 @@ pub fn register_all(state: &mut State) {
     register_debug(state);
     register_package(state);
     register_coroutine(state);
+
+    // Populate package.loaded with built-in modules
+    populate_package_loaded(state);
+}
+
+/// Populate package.loaded with references to standard library modules
+fn populate_package_loaded(state: &mut State) {
+    use crate::value::Value;
+
+    // Get package.loaded from registry (_LOADED)
+    let loaded_key = state.intern_string("_LOADED");
+    let loaded = unsafe {
+        (*state.registry.as_ptr()).get(&loaded_key)
+    };
+
+    if let Some(loaded_ref) = loaded.as_table() {
+        let loaded_tbl = unsafe { &mut *loaded_ref.as_ptr() };
+
+        // Add _G (globals table)
+        let g_key = state.intern_string("_G");
+        loaded_tbl.set(g_key, Value::table(state.globals));
+
+        // Add standard library modules
+        let modules = ["coroutine", "debug", "io", "math", "os", "package", "string", "table"];
+
+        for name in modules {
+            let key = state.intern_string(name);
+            let module = state.get_global(name);
+            if !module.is_nil() {
+                loaded_tbl.set(key, module);
+            }
+        }
+    }
 }

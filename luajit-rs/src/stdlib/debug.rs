@@ -16,14 +16,22 @@ pub fn register_debug(state: &mut State) {
     };
 
     // Add functions to debug table
-    add_func(state, debug_lib, "getmetatable", debug_getmetatable);
-    add_func(state, debug_lib, "setmetatable", debug_setmetatable);
-    add_func(state, debug_lib, "traceback", debug_traceback);
-    add_func(state, debug_lib, "getinfo", debug_getinfo);
-    add_func(state, debug_lib, "sethook", debug_sethook);
+    add_func(state, debug_lib, "debug", debug_debug);
+    add_func(state, debug_lib, "getfenv", debug_getfenv);
     add_func(state, debug_lib, "gethook", debug_gethook);
+    add_func(state, debug_lib, "getinfo", debug_getinfo);
     add_func(state, debug_lib, "getlocal", debug_getlocal);
+    add_func(state, debug_lib, "getmetatable", debug_getmetatable);
+    add_func(state, debug_lib, "getregistry", debug_getregistry);
+    add_func(state, debug_lib, "getupvalue", debug_getupvalue);
+    add_func(state, debug_lib, "setfenv", debug_setfenv);
+    add_func(state, debug_lib, "sethook", debug_sethook);
     add_func(state, debug_lib, "setlocal", debug_setlocal);
+    add_func(state, debug_lib, "setmetatable", debug_setmetatable);
+    add_func(state, debug_lib, "setupvalue", debug_setupvalue);
+    add_func(state, debug_lib, "traceback", debug_traceback);
+    add_func(state, debug_lib, "upvalueid", debug_upvalueid);
+    add_func(state, debug_lib, "upvaluejoin", debug_upvaluejoin);
 
     state.set_global("debug", Value::table(debug_lib));
 }
@@ -376,4 +384,270 @@ fn debug_setlocal(state: &mut State) -> LuaResult<usize> {
     // Simplified implementation - just return nil for now
     state.push(Value::nil())?;
     Ok(1)
+}
+
+/// debug.debug() -> nil
+/// Enters interactive debug mode (simplified - just returns immediately)
+fn debug_debug(_state: &mut State) -> LuaResult<usize> {
+    // In a real implementation, this would enter an interactive debugging REPL
+    // For now, we just return immediately
+    Ok(0)
+}
+
+/// debug.getfenv(o) -> table
+/// Returns the environment table of a function or thread.
+fn debug_getfenv(state: &mut State) -> LuaResult<usize> {
+    let o = state.get_value(1);
+
+    // In Lua 5.1/LuaJIT, functions have environments
+    // For now, return the global environment
+    if o.is_function() || o.is_nil() || o.as_integer() == Some(0) {
+        // Return globals table for functions or the main thread (0)
+        state.push(Value::table(state.globals))?;
+        Ok(1)
+    } else if let Some(n) = o.as_integer() {
+        // Stack level
+        if n > 0 {
+            // Return globals for now (simplified)
+            state.push(Value::table(state.globals))?;
+            Ok(1)
+        } else {
+            Err(LuaError::ArgumentError {
+                func: "getfenv".to_string(),
+                arg: 1,
+                msg: "level must be non-negative".to_string(),
+            })
+        }
+    } else {
+        Err(LuaError::ArgumentError {
+            func: "getfenv".to_string(),
+            arg: 1,
+            msg: "function or level expected".to_string(),
+        })
+    }
+}
+
+/// debug.setfenv(object, table) -> object
+/// Sets the environment table of a function.
+fn debug_setfenv(state: &mut State) -> LuaResult<usize> {
+    let o = state.get_value(1);
+    let env = state.get_value(2);
+
+    if !env.is_table() {
+        return Err(LuaError::ArgumentError {
+            func: "setfenv".to_string(),
+            arg: 2,
+            msg: "table expected".to_string(),
+        });
+    }
+
+    // In a full implementation, this would set the function's _ENV
+    // For now, just return the object
+    state.push(o)?;
+    Ok(1)
+}
+
+/// debug.getregistry() -> table
+/// Returns the registry table.
+fn debug_getregistry(state: &mut State) -> LuaResult<usize> {
+    state.push(Value::table(state.registry))?;
+    Ok(1)
+}
+
+/// debug.getupvalue(f, up) -> name, value
+/// Returns the name and value of upvalue up of function f.
+fn debug_getupvalue(state: &mut State) -> LuaResult<usize> {
+    let f = state.get_value(1);
+    let up = state.to_integer(2).unwrap_or(0) as usize;
+
+    if up < 1 {
+        state.push(Value::nil())?;
+        return Ok(1);
+    }
+
+    if let Some(func_ref) = f.as_function() {
+        let func = unsafe { &*func_ref.as_ptr() };
+
+        match func {
+            Function::Lua(closure) => {
+                let upvalue_index = up - 1; // 1-based to 0-based
+                if upvalue_index < closure.upvalues.len() {
+                    // Get upvalue name from prototype if available
+                    let proto = unsafe { &*closure.proto.as_ptr() };
+                    let name = if upvalue_index < proto.upvalue_names.len() {
+                        if let Some(name_ref) = proto.upvalue_names[upvalue_index] {
+                            let name_str = unsafe { &*name_ref.as_ptr() };
+                            name_str.as_str().unwrap_or("").to_string()
+                        } else {
+                            "".to_string()
+                        }
+                    } else {
+                        "".to_string()
+                    };
+
+                    // Get upvalue value
+                    let upval_ref = &closure.upvalues[upvalue_index];
+                    let upval = unsafe { &*upval_ref.as_ptr() };
+                    let value = upval.get();
+
+                    let name_val = state.intern_string(&name);
+                    state.push(name_val)?;
+                    state.push(value)?;
+                    return Ok(2);
+                }
+            }
+            Function::Native(_) => {
+                // Native functions don't have upvalues accessible this way
+            }
+        }
+    }
+
+    state.push(Value::nil())?;
+    Ok(1)
+}
+
+/// debug.setupvalue(f, up, value) -> name
+/// Sets the value of upvalue up of function f.
+fn debug_setupvalue(state: &mut State) -> LuaResult<usize> {
+    let f = state.get_value(1);
+    let up = state.to_integer(2).unwrap_or(0) as usize;
+    let value = state.get_value(3);
+
+    if up < 1 {
+        state.push(Value::nil())?;
+        return Ok(1);
+    }
+
+    if let Some(func_ref) = f.as_function() {
+        let func = unsafe { &mut *func_ref.as_ptr() };
+
+        match func {
+            Function::Lua(closure) => {
+                let upvalue_index = up - 1;
+                if upvalue_index < closure.upvalues.len() {
+                    // Get upvalue name from prototype
+                    let proto = unsafe { &*closure.proto.as_ptr() };
+                    let name = if upvalue_index < proto.upvalue_names.len() {
+                        if let Some(name_ref) = proto.upvalue_names[upvalue_index] {
+                            let name_str = unsafe { &*name_ref.as_ptr() };
+                            name_str.as_str().unwrap_or("").to_string()
+                        } else {
+                            "".to_string()
+                        }
+                    } else {
+                        "".to_string()
+                    };
+
+                    // Set upvalue value
+                    let upval = unsafe { &*closure.upvalues[upvalue_index].as_ptr() };
+                    upval.set(value);
+
+                    let name_val = state.intern_string(&name);
+                    state.push(name_val)?;
+                    return Ok(1);
+                }
+            }
+            Function::Native(_) => {
+                // Native functions don't have upvalues
+            }
+        }
+    }
+
+    state.push(Value::nil())?;
+    Ok(1)
+}
+
+/// debug.upvalueid(f, n) -> id
+/// Returns a unique identifier for upvalue n of function f.
+fn debug_upvalueid(state: &mut State) -> LuaResult<usize> {
+    let f = state.get_value(1);
+    let n = state.to_integer(2).unwrap_or(0) as usize;
+
+    if n < 1 {
+        return Err(LuaError::ArgumentError {
+            func: "upvalueid".to_string(),
+            arg: 2,
+            msg: "invalid upvalue index".to_string(),
+        });
+    }
+
+    if let Some(func_ref) = f.as_function() {
+        let func = unsafe { &*func_ref.as_ptr() };
+
+        match func {
+            Function::Lua(closure) => {
+                let upvalue_index = n - 1;
+                if upvalue_index < closure.upvalues.len() {
+                    // Return the address of the upvalue as a light userdata
+                    let upval_ptr = &closure.upvalues[upvalue_index] as *const _ as *mut ();
+                    state.push(Value::light_userdata(upval_ptr))?;
+                    return Ok(1);
+                }
+            }
+            Function::Native(_) => {}
+        }
+    }
+
+    Err(LuaError::ArgumentError {
+        func: "upvalueid".to_string(),
+        arg: 2,
+        msg: "invalid upvalue index".to_string(),
+    })
+}
+
+/// debug.upvaluejoin(f1, n1, f2, n2)
+/// Makes the n1-th upvalue of f1 refer to the n2-th upvalue of f2.
+fn debug_upvaluejoin(state: &mut State) -> LuaResult<usize> {
+    let f1 = state.get_value(1);
+    let n1 = state.to_integer(2).unwrap_or(0) as usize;
+    let f2 = state.get_value(3);
+    let n2 = state.to_integer(4).unwrap_or(0) as usize;
+
+    if n1 < 1 || n2 < 1 {
+        return Err(LuaError::ArgumentError {
+            func: "upvaluejoin".to_string(),
+            arg: if n1 < 1 { 2 } else { 4 },
+            msg: "invalid upvalue index".to_string(),
+        });
+    }
+
+    // Validate both functions are Lua closures
+    let func1_ref = f1.as_function().ok_or_else(|| LuaError::ArgumentError {
+        func: "upvaluejoin".to_string(),
+        arg: 1,
+        msg: "Lua function expected".to_string(),
+    })?;
+
+    let func2_ref = f2.as_function().ok_or_else(|| LuaError::ArgumentError {
+        func: "upvaluejoin".to_string(),
+        arg: 3,
+        msg: "Lua function expected".to_string(),
+    })?;
+
+    let func1 = unsafe { &mut *func1_ref.as_ptr() };
+    let func2 = unsafe { &*func2_ref.as_ptr() };
+
+    match (func1, func2) {
+        (Function::Lua(closure1), Function::Lua(closure2)) => {
+            let idx1 = n1 - 1;
+            let idx2 = n2 - 1;
+
+            if idx1 >= closure1.upvalues.len() || idx2 >= closure2.upvalues.len() {
+                return Err(LuaError::ArgumentError {
+                    func: "upvaluejoin".to_string(),
+                    arg: if idx1 >= closure1.upvalues.len() { 2 } else { 4 },
+                    msg: "invalid upvalue index".to_string(),
+                });
+            }
+
+            // Clone the upvalue reference from closure2 to closure1
+            closure1.upvalues[idx1] = closure2.upvalues[idx2].clone();
+            Ok(0)
+        }
+        _ => Err(LuaError::ArgumentError {
+            func: "upvaluejoin".to_string(),
+            arg: 1,
+            msg: "Lua function expected".to_string(),
+        }),
+    }
 }

@@ -27,19 +27,59 @@ pub fn register_package(state: &mut State) {
     let default_path = "./?.lua;./?/init.lua;/usr/local/share/lua/5.1/?.lua";
     let path_val = state.intern_string(default_path);
 
+    // Create package.loaders table (Lua 5.1 compatible)
+    let loaders = state.create_table(4, 0);
+
+    // Add native function for loadlib
+    let native_loadlib = NativeFunction::new(package_loadlib);
+    let loadlib_func = state.gc.alloc(Function::Native(native_loadlib));
+
+    // Add native function for seeall
+    let native_seeall = NativeFunction::new(package_seeall);
+    let seeall_func = state.gc.alloc(Function::Native(native_seeall));
+
     // Store in package table
     let loaded_key = state.intern_string("loaded");
     let preload_key = state.intern_string("preload");
     let path_key = state.intern_string("path");
     let cpath_key = state.intern_string("cpath");
+    let loaders_key = state.intern_string("loaders");
+    let loadlib_key = state.intern_string("loadlib");
+    let seeall_key = state.intern_string("seeall");
+    let config_key = state.intern_string("config");
+
+    // Package config string (directory separator, path separator, etc.)
+    let config_val = state.intern_string("/\n;\n?\n!\n-");
 
     unsafe {
         let pkg = &mut *package.as_ptr();
         pkg.set(loaded_key, Value::table(loaded));
         pkg.set(preload_key, Value::table(preload));
-        pkg.set(path_val, path_val);
         pkg.set(path_key, path_val);
         pkg.set(cpath_key, state.intern_string("")); // No C path support yet
+        pkg.set(loaders_key, Value::table(loaders));
+        pkg.set(loadlib_key, Value::function(loadlib_func));
+        pkg.set(seeall_key, Value::function(seeall_func));
+        pkg.set(config_key, config_val);
+
+        // Add loaders (1-indexed as table array)
+        let loaders_tbl = &mut *loaders.as_ptr();
+        // Loader 1: preload
+        let preload_loader = NativeFunction::new(loader_preload);
+        let loader1 = state.gc.alloc(Function::Native(preload_loader));
+        loaders_tbl.set_array(1, Value::function(loader1));
+        // Loader 2: Lua loader (file-based)
+        let lua_loader = NativeFunction::new(loader_lua);
+        let loader2 = state.gc.alloc(Function::Native(lua_loader));
+        loaders_tbl.set_array(2, Value::function(loader2));
+        // Loader 3: C loader (stub)
+        let c_loader = NativeFunction::new(loader_c);
+        let loader3 = state.gc.alloc(Function::Native(c_loader));
+        loaders_tbl.set_array(3, Value::function(loader3));
+        // Loader 4: all-in-one C loader (stub)
+        let all_loader = NativeFunction::new(loader_croot);
+        let loader4 = state.gc.alloc(Function::Native(all_loader));
+        loaders_tbl.set_array(4, Value::function(loader4));
     }
 
     // Store package.loaded reference in registry for quick access
@@ -450,4 +490,113 @@ fn jit_flush(_state: &mut State) -> LuaResult<usize> { Ok(0) }
 fn jit_status(state: &mut State) -> LuaResult<usize> {
     state.push(Value::boolean(false))?; // JIT is off
     Ok(1)
+}
+
+/// package.loadlib(libname, funcname) -> function | nil, error
+/// Loads a C library - returns nil since we don't support C libraries
+fn package_loadlib(state: &mut State) -> LuaResult<usize> {
+    state.push(Value::nil())?;
+    let msg = state.intern_string("C library loading not supported");
+    state.push(msg)?;
+    Ok(2)
+}
+
+/// package.seeall(module) - sets up module to see all globals
+fn package_seeall(state: &mut State) -> LuaResult<usize> {
+    let module = state.get_value(1);
+    if let Some(t) = module.as_table() {
+        // Create metatable with __index = _G
+        let mt = state.create_table(0, 1);
+        let index_key = state.intern_string("__index");
+        unsafe {
+            (*mt.as_ptr()).set(index_key, Value::table(state.globals));
+            (*t.as_ptr()).set_metatable(Some(mt));
+        }
+    }
+    Ok(0)
+}
+
+/// Loader 1: preload loader - looks in package.preload
+fn loader_preload(state: &mut State) -> LuaResult<usize> {
+    let modname = state.get_value(1);
+    let modname_str = if let Some(s) = modname.as_string() {
+        unsafe { (*s.as_ptr()).as_str() }.map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    if let Some(name) = modname_str {
+        // Get package.preload
+        let package_key = state.intern_string("package");
+        let package = unsafe { (*state.globals.as_ptr()).get(&package_key) };
+        if let Some(pkg) = package.as_table() {
+            let preload_key = state.intern_string("preload");
+            let preload = unsafe { (*pkg.as_ptr()).get(&preload_key) };
+            if let Some(preload_tbl) = preload.as_table() {
+                let name_key = state.intern_string(&name);
+                let loader = unsafe { (*preload_tbl.as_ptr()).get(&name_key) };
+                if !loader.is_nil() {
+                    state.push(loader)?;
+                    return Ok(1);
+                }
+            }
+        }
+    }
+    let msg = state.intern_string("\n\tno field package.preload");
+    state.push(msg)?;
+    Ok(1)
+}
+
+/// Loader 2: Lua file loader
+fn loader_lua(state: &mut State) -> LuaResult<usize> {
+    let modname = state.get_value(1);
+    let modname_str = if let Some(s) = modname.as_string() {
+        unsafe { (*s.as_ptr()).as_str() }.map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    if modname_str.is_none() {
+        let msg = state.intern_string("\n\t(invalid module name)");
+        state.push(msg)?;
+        return Ok(1);
+    }
+    let name = modname_str.unwrap();
+
+    // Get package.path
+    let path = get_package_path(state);
+    let mut errors = String::new();
+
+    for template in path.split(';') {
+        let filepath = template.replace("?", &name.replace(".", "/"));
+        if Path::new(&filepath).exists() {
+            // Load the file
+            let source = match std::fs::read_to_string(&filepath) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            match state.load_string(&source, &format!("@{}", filepath)) {
+                Ok(func) => {
+                    state.push(Value::function(func))?;
+                    return Ok(1);
+                }
+                Err(_) => continue,
+            }
+        }
+        errors.push_str(&format!("\n\tno file '{}'", filepath));
+    }
+
+    let msg = state.intern_string(&errors);
+    state.push(msg)?;
+    Ok(1)
+}
+
+/// Loader 3: C library loader (stub)
+fn loader_c(_state: &mut State) -> LuaResult<usize> {
+    Ok(0) // No C library support
+}
+
+/// Loader 4: all-in-one C loader (stub)
+fn loader_croot(_state: &mut State) -> LuaResult<usize> {
+    Ok(0) // No C library support
 }

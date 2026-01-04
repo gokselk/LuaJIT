@@ -42,6 +42,8 @@ pub struct State {
     pub status: ThreadStatus,
     /// Head of the open upvalue list (sorted by stack slot address, highest first)
     pub open_upvalues: Option<GcRef<Upvalue>>,
+    /// Whether the current call is a method call (for error formatting)
+    pub is_method_call: bool,
 }
 
 /// Thread/coroutine status
@@ -81,6 +83,7 @@ impl State {
             allow_hook: true,
             status: ThreadStatus::Ok,
             open_upvalues: None,
+            is_method_call: false,
         };
 
         // Initialize standard globals
@@ -244,6 +247,32 @@ impl State {
     /// Get value as integer (with string coercion)
     pub fn to_integer(&self, index: i32) -> Option<i32> {
         self.get_value(index).coerce_to_integer()
+    }
+
+    /// Create an argument error, checking if this is a method call for arg 1
+    /// For method calls, arg 1 becomes a "self" error, and other args are renumbered
+    pub fn arg_error(&self, func: &str, arg: usize, msg: &str) -> LuaError {
+        if self.is_method_call {
+            if arg == 1 {
+                LuaError::SelfError {
+                    func: func.to_string(),
+                    msg: msg.to_string(),
+                }
+            } else {
+                // For method calls, arguments are shifted by -1
+                LuaError::ArgumentError {
+                    func: func.to_string(),
+                    arg: arg - 1,
+                    msg: msg.to_string(),
+                }
+            }
+        } else {
+            LuaError::ArgumentError {
+                func: func.to_string(),
+                arg,
+                msg: msg.to_string(),
+            }
+        }
     }
 
     /// Get value as string (with number-to-string coercion)

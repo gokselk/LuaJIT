@@ -32,6 +32,17 @@ pub fn register_string(state: &mut State) {
     add_func(state, string_table, "dump", string_dump);
 
     state.set_global("string", Value::table(string_table));
+
+    // Create string metatable with __index pointing to the string table
+    // This allows string methods to be called on strings: ("hello"):upper()
+    let string_mt = state.create_table(0, 2);
+    let index_key = state.intern_string("__index");
+    unsafe {
+        (*string_mt.as_ptr()).set(index_key, Value::table(string_table));
+    }
+
+    // Set the string type metatable (LuaType::String = 4)
+    state.metatables[4] = Some(string_mt);
 }
 
 fn string_byte(state: &mut State) -> LuaResult<usize> {
@@ -93,16 +104,22 @@ fn string_char(state: &mut State) -> LuaResult<usize> {
 
 fn string_len(state: &mut State) -> LuaResult<usize> {
     let s = state.get_value(1);
+    // Try number-to-string coercion first
+    if let Some(n) = s.as_number() {
+        let str_val = if n == (n as i64 as f64) && n.is_finite() {
+            format!("{}", n as i64)
+        } else {
+            format!("{}", n)
+        };
+        state.push(Value::integer(str_val.len() as i32))?;
+        return Ok(1);
+    }
     if let Some(str_ref) = s.as_string() {
         let len = unsafe { (*str_ref.as_ptr()).len() };
         state.push(Value::integer(len as i32))?;
         Ok(1)
     } else {
-        Err(LuaError::ArgumentError {
-            func: "string.len".to_string(),
-            arg: 1,
-            msg: "string expected".to_string(),
-        })
+        Err(state.arg_error("len", 1, &format!("string expected, got {}", s.lua_type())))
     }
 }
 
@@ -241,31 +258,48 @@ fn string_reverse(state: &mut State) -> LuaResult<usize> {
 
 fn string_sub(state: &mut State) -> LuaResult<usize> {
     let s = state.get_value(1);
-    let i = state.to_integer(2).unwrap_or(1);
+
+    // Get string, with number-to-string coercion
+    let str_bytes = if let Some(str_ref) = s.as_string() {
+        let str_val = unsafe { &*str_ref.as_ptr() };
+        str_val.as_bytes().to_vec()
+    } else if let Some(n) = s.as_number() {
+        // Number-to-string coercion
+        let str_val = if n == (n as i64 as f64) && n.is_finite() {
+            format!("{}", n as i64)
+        } else {
+            format!("{}", n)
+        };
+        str_val.into_bytes()
+    } else {
+        return Err(state.arg_error("sub", 1, &format!("string expected, got {}", s.lua_type())));
+    };
+
+    // Get start index, with proper type checking
+    let i_val = state.get_value(2);
+    let i = if state.get_top() < 2 || i_val.is_nil() {
+        1
+    } else if let Some(n) = i_val.coerce_to_integer() {
+        n
+    } else {
+        return Err(state.arg_error("sub", 2, &format!("number expected, got {}", i_val.lua_type())));
+    };
+
+    // Get end index with coercion
     let j = state.to_integer(3).unwrap_or(-1);
 
-    if let Some(str_ref) = s.as_string() {
-        let str_val = unsafe { &*str_ref.as_ptr() };
-        if let Some(s) = str_val.as_str() {
-            let len = s.len() as i32;
-            let start = if i >= 0 { i - 1 } else { (len + i).max(0) } as usize;
-            let end = if j >= 0 { j } else { len + j + 1 } as usize;
+    let len = str_bytes.len() as i32;
+    let start = if i >= 0 { i - 1 } else { (len + i).max(0) } as usize;
+    let end = if j >= 0 { j } else { len + j + 1 } as usize;
 
-            let result = if start < end && start < s.len() {
-                s[start..end.min(s.len())].to_string()
-            } else {
-                String::new()
-            };
-            let val = state.intern_string(&result);
-            state.push(val)?;
-            return Ok(1);
-        }
-    }
-    Err(LuaError::ArgumentError {
-        func: "string.sub".to_string(),
-        arg: 1,
-        msg: "string expected".to_string(),
-    })
+    let result = if start < end && start < str_bytes.len() {
+        &str_bytes[start..end.min(str_bytes.len())]
+    } else {
+        &[]
+    };
+    let val = state.intern_bytes(result);
+    state.push(val)?;
+    Ok(1)
 }
 
 fn string_format(state: &mut State) -> LuaResult<usize> {

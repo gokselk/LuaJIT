@@ -83,11 +83,7 @@ fn get_num(state: &State, idx: i32, func_name: &str) -> LuaResult<f64> {
             } else {
                 format!("{}", val.lua_type())
             };
-            Err(LuaError::ArgumentError {
-                func: func_name.to_string(),
-                arg: idx as usize,
-                msg: format!("number expected, got {}", got),
-            })
+            Err(state.arg_error(func_name, idx as usize, &format!("number expected, got {}", got)))
         }
     }
 }
