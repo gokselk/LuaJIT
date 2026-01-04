@@ -547,24 +547,225 @@ fn format_value(val: &Value) -> String {
     }
 }
 
-/// load(chunk [, chunkname [, mode [, env]]]) - stub
-fn lua_load(_state: &mut State) -> LuaResult<usize> {
-    Err(LuaError::RuntimeError("load not yet implemented".to_string()))
+/// load(chunk [, chunkname [, mode [, env]]]) -> function | nil, error
+fn lua_load(state: &mut State) -> LuaResult<usize> {
+    let chunk_val = state.get_value(1);
+
+    // Get the source - can be a string or a function that returns strings
+    let source = if let Some(s) = chunk_val.as_string() {
+        let s = unsafe { &*s.as_ptr() };
+        if let Some(str_val) = s.as_str() {
+            str_val.to_string()
+        } else {
+            String::from_utf8_lossy(s.as_bytes()).to_string()
+        }
+    } else if chunk_val.is_function() {
+        // Call the function repeatedly to get source chunks
+        let mut source = String::new();
+        loop {
+            let base = state.stack.top();
+            state.stack.set(base, chunk_val.clone());
+            state.stack.set_top(base + 1);
+            if state.call(0, 1).is_err() {
+                break;
+            }
+            let result = state.get_value(1);
+            if result.is_nil() {
+                break;
+            }
+            if let Some(s) = result.as_string() {
+                let s = unsafe { &*s.as_ptr() };
+                if let Some(str_val) = s.as_str() {
+                    if str_val.is_empty() {
+                        break;
+                    }
+                    source.push_str(str_val);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+            state.set_top(0);
+        }
+        source
+    } else {
+        return Err(LuaError::ArgumentError {
+            func: "load".to_string(),
+            arg: 1,
+            msg: "string or function expected".to_string(),
+        });
+    };
+
+    let chunk_name = if state.get_top() >= 2 {
+        let name_val = state.get_value(2);
+        if let Some(s) = name_val.as_string() {
+            let s = unsafe { &*s.as_ptr() };
+            s.as_str().map(|s| s.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    }.unwrap_or_else(|| "=(load)".to_string());
+
+    // Note: mode and env parameters are currently ignored
+
+    match state.load_string(&source, &chunk_name) {
+        Ok(func) => {
+            state.push(Value::function(func))?;
+            Ok(1)
+        }
+        Err(e) => {
+            state.push(Value::nil())?;
+            let err_msg = state.intern_string(&e.to_string());
+            state.push(err_msg)?;
+            Ok(2)
+        }
+    }
 }
 
-/// loadstring(string [, chunkname]) - stub
-fn lua_loadstring(_state: &mut State) -> LuaResult<usize> {
-    Err(LuaError::RuntimeError("loadstring not yet implemented".to_string()))
+/// loadstring(string [, chunkname]) -> function | nil, error
+fn lua_loadstring(state: &mut State) -> LuaResult<usize> {
+    let source_val = state.get_value(1);
+
+    let source = if let Some(s) = source_val.as_string() {
+        let s = unsafe { &*s.as_ptr() };
+        if let Some(str_val) = s.as_str() {
+            str_val.to_string()
+        } else {
+            // Binary string - try to interpret as UTF-8 lossy
+            String::from_utf8_lossy(s.as_bytes()).to_string()
+        }
+    } else {
+        return Err(LuaError::ArgumentError {
+            func: "loadstring".to_string(),
+            arg: 1,
+            msg: "string expected".to_string(),
+        });
+    };
+
+    let chunk_name = if state.get_top() >= 2 {
+        let name_val = state.get_value(2);
+        if let Some(s) = name_val.as_string() {
+            let s = unsafe { &*s.as_ptr() };
+            s.as_str().map(|s| s.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    }.unwrap_or_else(|| "=(loadstring)".to_string());
+
+    match state.load_string(&source, &chunk_name) {
+        Ok(func) => {
+            state.push(Value::function(func))?;
+            Ok(1)
+        }
+        Err(e) => {
+            // On error, return nil and error message
+            state.push(Value::nil())?;
+            let err_msg = state.intern_string(&e.to_string());
+            state.push(err_msg)?;
+            Ok(2)
+        }
+    }
 }
 
-/// loadfile([filename [, mode [, env]]]) - stub
-fn lua_loadfile(_state: &mut State) -> LuaResult<usize> {
-    Err(LuaError::RuntimeError("loadfile not yet implemented".to_string()))
+/// loadfile([filename [, mode [, env]]]) -> function | nil, error
+fn lua_loadfile(state: &mut State) -> LuaResult<usize> {
+    let filename_val = state.get_value(1);
+
+    let filename = if filename_val.is_nil() {
+        // Read from stdin
+        return Err(LuaError::RuntimeError(
+            "loadfile from stdin not yet implemented".to_string(),
+        ));
+    } else if let Some(s) = filename_val.as_string() {
+        let s = unsafe { &*s.as_ptr() };
+        s.as_str()
+            .ok_or_else(|| LuaError::ArgumentError {
+                func: "loadfile".to_string(),
+                arg: 1,
+                msg: "string expected".to_string(),
+            })?
+            .to_string()
+    } else {
+        return Err(LuaError::ArgumentError {
+            func: "loadfile".to_string(),
+            arg: 1,
+            msg: "string expected".to_string(),
+        });
+    };
+
+    // Read file contents
+    let source = match std::fs::read_to_string(&filename) {
+        Ok(s) => s,
+        Err(e) => {
+            state.push(Value::nil())?;
+            let err_msg = state.intern_string(&format!("cannot open {}: {}", filename, e));
+            state.push(err_msg)?;
+            return Ok(2);
+        }
+    };
+
+    let chunk_name = format!("@{}", filename);
+
+    match state.load_string(&source, &chunk_name) {
+        Ok(func) => {
+            state.push(Value::function(func))?;
+            Ok(1)
+        }
+        Err(e) => {
+            state.push(Value::nil())?;
+            let err_msg = state.intern_string(&e.to_string());
+            state.push(err_msg)?;
+            Ok(2)
+        }
+    }
 }
 
-/// dofile([filename]) - stub
-fn lua_dofile(_state: &mut State) -> LuaResult<usize> {
-    Err(LuaError::RuntimeError("dofile not yet implemented".to_string()))
+/// dofile([filename]) -> results...
+fn lua_dofile(state: &mut State) -> LuaResult<usize> {
+    let filename_val = state.get_value(1);
+
+    let filename = if filename_val.is_nil() {
+        return Err(LuaError::RuntimeError(
+            "dofile from stdin not yet implemented".to_string(),
+        ));
+    } else if let Some(s) = filename_val.as_string() {
+        let s = unsafe { &*s.as_ptr() };
+        s.as_str()
+            .ok_or_else(|| LuaError::ArgumentError {
+                func: "dofile".to_string(),
+                arg: 1,
+                msg: "string expected".to_string(),
+            })?
+            .to_string()
+    } else {
+        return Err(LuaError::ArgumentError {
+            func: "dofile".to_string(),
+            arg: 1,
+            msg: "string expected".to_string(),
+        });
+    };
+
+    // Read file contents
+    let source = std::fs::read_to_string(&filename)
+        .map_err(|e| LuaError::RuntimeError(format!("cannot open {}: {}", filename, e)))?;
+
+    let chunk_name = format!("@{}", filename);
+    let func = state.load_string(&source, &chunk_name)?;
+
+    // Clear stack and push the function
+    state.set_top(0);
+    state.push(Value::function(func))?;
+
+    // Call with 0 args, variable results
+    state.call(0, -1)?;
+
+    // Return all results
+    Ok(state.get_top())
 }
 
 /// getfenv([f]) - stub

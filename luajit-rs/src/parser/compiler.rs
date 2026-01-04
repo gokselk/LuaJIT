@@ -69,6 +69,10 @@ struct FunctionState {
     loop_start: Option<usize>,
     /// Block nesting level
     block_level: usize,
+    /// Labels: name -> PC
+    labels: std::collections::HashMap<String, usize>,
+    /// Pending gotos: (name, PC of JMP instruction)
+    pending_gotos: Vec<(String, usize)>,
 }
 
 impl FunctionState {
@@ -84,6 +88,8 @@ impl FunctionState {
             break_jumps: Vec::new(),
             loop_start: None,
             block_level: 0,
+            labels: std::collections::HashMap::new(),
+            pending_gotos: Vec::new(),
         }
     }
 
@@ -263,11 +269,32 @@ impl<'a> Compiler<'a> {
         let line = self.current_line();
         self.fs_mut().emit(Instruction::ad(Opcode::RET0, 0, 1), line);
 
+        // Resolve gotos
+        self.resolve_gotos()?;
+
         // Finalize
         let mut fs = self.functions.pop().unwrap();
         fs.proto.num_upvalues = fs.upvalues.len() as u8;
 
         Ok(fs.proto)
+    }
+
+    /// Resolve all pending goto statements
+    fn resolve_gotos(&mut self) -> LuaResult<()> {
+        let pending_gotos = std::mem::take(&mut self.fs_mut().pending_gotos);
+        let labels = self.fs().labels.clone();
+
+        for (label_name, goto_pc) in pending_gotos {
+            if let Some(&target_pc) = labels.get(&label_name) {
+                self.patch_jump(goto_pc, target_pc)?;
+            } else {
+                return Err(LuaError::SyntaxError(format!(
+                    "no visible label '{}' for goto", label_name
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     /// Parse a block of statements
@@ -1019,20 +1046,35 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    /// Parse goto (simplified - just skip)
+    /// Parse goto statement
     fn parse_goto(&mut self) -> LuaResult<()> {
         self.lexer.next()?; // consume 'goto'
-        self.lexer.expect(TokenKind::Name("".to_string()))?;
-        // Labels not fully implemented
+        let label_name = match self.lexer.next()?.kind {
+            TokenKind::Name(n) => n,
+            _ => return Err(LuaError::SyntaxError("expected label name after goto".to_string())),
+        };
+
+        // Record the goto for later resolution
+        let pc = self.fs().current_pc();
+        let line = self.current_line();
+        // Emit a placeholder jump that will be patched later
+        self.fs_mut().emit(Instruction::adj(Opcode::JMP, 0, 0), line);
+        self.fs_mut().pending_gotos.push((label_name, pc));
         Ok(())
     }
 
     /// Parse label ::name::
     fn parse_label(&mut self) -> LuaResult<()> {
         self.lexer.next()?; // consume '::'
-        self.lexer.next()?; // consume name
+        let label_name = match self.lexer.next()?.kind {
+            TokenKind::Name(n) => n,
+            _ => return Err(LuaError::SyntaxError("expected label name".to_string())),
+        };
         self.lexer.expect(TokenKind::ColonColon)?;
-        // Labels not fully implemented
+
+        // Record the label location
+        let pc = self.fs().current_pc();
+        self.fs_mut().labels.insert(label_name, pc);
         Ok(())
     }
 
@@ -2418,6 +2460,9 @@ impl<'a> Compiler<'a> {
         // Emit return if not present
         let line = self.current_line();
         self.fs_mut().emit(Instruction::ad(Opcode::RET0, 0, 1), line);
+
+        // Resolve gotos
+        self.resolve_gotos()?;
 
         // Pop function state and copy metadata to proto
         let mut fs = self.functions.pop().unwrap();
